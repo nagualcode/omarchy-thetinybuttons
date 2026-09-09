@@ -148,16 +148,14 @@ Item {
     Quickshell.execDetached(["bash", "-lc", script, "bash", normalized])
   }
 
+  // Toggle floating state for a specific window. There's no classic
+  // "togglefloating" dispatcher in Omarchy's Lua build — the floating
+  // dispatcher is hl.dsp.window.float, and the targeted window is passed
+  // with an "address:0x..." selector.
   function toggleWindow(addr) {
     var normalized = service.normalizedAddress(addr)
     if (!normalized) return
-    var script = "addr=\"$1\"; "
-      + "orig=false; hyprctl -j getoption cursor:no_warps | grep -q '\"bool\": true' && orig=true; "
-      + "hyprctl eval 'hl.config({ cursor = { no_warps = true } })' >/dev/null; "
-      + "hyprctl dispatch \"hl.dsp.focus({ window = \\\"address:$addr\\\" })\" >/dev/null; "
-      + "hyprctl dispatch togglefloating; "
-      + "hyprctl eval \"hl.config({ cursor = { no_warps = $orig } })\" >/dev/null"
-    Quickshell.execDetached(["bash", "-lc", script, "bash", normalized])
+    Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.float({ action = \"toggle\", window = \"address:" + normalized + "\" })"])
   }
 
   function screenForMonitor(monitor) {
