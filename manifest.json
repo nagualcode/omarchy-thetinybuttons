@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "nagualcode.thetinybuttons",
+  "name": "thetinybuttons",
+  "version": "1.0.0",
+  "author": "nagualcode",
+  "license": "MIT",
+  "description": "Two tiny corner buttons: close (top-right) and toggle float/tiling (top-left). Both support click-and-drag to move windows.",
+  "kinds": ["service"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml"
+  }
+}
