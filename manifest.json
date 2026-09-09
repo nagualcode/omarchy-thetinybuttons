@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "nagualcode",
   "license": "MIT",
-  "description": "Two tiny corner buttons: close (top-right) and toggle float/tiling (top-left). Both support click-and-drag to move windows.",
+  "description": "One tiny corner button: left-click toggles float/tiling, right-click closes, and click-and-drag moves the window.",
   "kinds": ["service"],
   "keepLoaded": true,
   "entryPoints": {

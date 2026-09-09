@@ -1,10 +1,9 @@
-// thetinybuttons — tiny corner buttons that also let you drag windows.
+// thetinybuttons — a single tiny corner button that does a lot.
 //
-// Top-right: close button (✕).
-// Top-left:  toggle float/tiling button (◇).
-//
-// Both buttons reveal on hover, support click-and-drag to move the
-// underlying window, and follow the current Hyprland theme colors.
+// One button on the top-right corner of every window:
+//   • Left-click  (primary) → toggle between tiling and float mode
+//   • Right-click (context) → close the window
+//   • Click-and-drag         → move the window
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -135,6 +134,16 @@ Item {
     Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.close({ address = \"" + normalized + "\" })"])
   }
 
+  // Toggle floating state for a specific window. There's no classic
+  // "togglefloating" dispatcher in Omarchy's Lua build — the floating
+  // dispatcher is hl.dsp.window.float, and the targeted window is passed
+  // with an "address:0x..." selector.
+  function toggleWindow(addr) {
+    var normalized = service.normalizedAddress(addr)
+    if (!normalized) return
+    Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.float({ action = \"toggle\", window = \"address:" + normalized + "\" })"])
+  }
+
   // Focus without warping the cursor — same trick as the original
   // axel.window-close-buttons plugin.
   function focusWindow(addr) {
@@ -148,16 +157,6 @@ Item {
     Quickshell.execDetached(["bash", "-lc", script, "bash", normalized])
   }
 
-  // Toggle floating state for a specific window. There's no classic
-  // "togglefloating" dispatcher in Omarchy's Lua build — the floating
-  // dispatcher is hl.dsp.window.float, and the targeted window is passed
-  // with an "address:0x..." selector.
-  function toggleWindow(addr) {
-    var normalized = service.normalizedAddress(addr)
-    if (!normalized) return
-    Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.float({ action = \"toggle\", window = \"address:" + normalized + "\" })"])
-  }
-
   function screenForMonitor(monitor) {
     if (!monitor || !monitor.name) return null
     var screens = Quickshell.screens
@@ -167,8 +166,9 @@ Item {
     return null
   }
 
-  // ── drag state (per-button, shared across both corners) ─────────────
+  // ── drag state (shared) ─────────────────────────────────────────────
   property bool dragging: false
+  property int dragButton: Qt.NoButton
   property real dragStartX: 0
   property real dragStartY: 0
   property real dragWinOrigX: 0
@@ -184,13 +184,12 @@ Item {
     onTriggered: Hyprland.refreshToplevels()
   }
 
-  // ── per-window buttons ──────────────────────────────────────────────
+  // ── per-window button (top-right) ───────────────────────────────────
   Variants {
     model: Hyprland.toplevels.values
 
-    // ─── close button (top-right) ─────────────────────────────────────
     PanelWindow {
-      id: closeWin
+      id: cornerWindow
       required property var modelData
 
       readonly property var info: modelData ? modelData.lastIpcObject : null
@@ -209,7 +208,7 @@ Item {
       visible: showable
       color: "transparent"
 
-      WlrLayershell.namespace: "omarchy-window-close-button"
+      WlrLayershell.namespace: "omarchy-tinybuttons"
       WlrLayershell.layer: WlrLayer.Overlay
       WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
       exclusionMode: ExclusionMode.Ignore
@@ -218,83 +217,100 @@ Item {
       implicitHeight: service.dragging ? service.expandedSize : service.hitSize
 
       anchors { right: true; top: true }
-      margins.right: showable ? Math.round(info.at[0] + info.size[0] - targetScreen.x - closeWin.width / 2) : 0
-      margins.top: showable ? Math.round(info.at[1] - targetScreen.y - closeWin.height / 2) : 0
+      margins.right: showable ? Math.round(info.at[0] + info.size[0] - targetScreen.x - cornerWindow.width / 2) : 0
+      margins.top: showable ? Math.round(info.at[1] - targetScreen.y - cornerWindow.height / 2) : 0
 
       HoverHandler {
-        id: closeHover
-        onHoveredChanged: if (hovered) closeWin.forceHidden = false
+        id: hover
+        onHoveredChanged: if (hovered) cornerWindow.forceHidden = false
       }
 
       Rectangle {
-        id: closeCircle
+        id: circle
         // Anchor to the top-right corner of the window regardless of
         // PanelWindow size — keeps the button visually fixed during a drag
         // expansion even though the PanelWindow itself moves.
-        x: closeWin.width - service.circleSize - service.circleInset
-          - (closeWin.width - service.hitSize) / 2
-        y: service.circleInset + (closeWin.height - service.hitSize) / 2
+        x: cornerWindow.width - service.circleSize - service.circleInset
+          - (cornerWindow.width - service.hitSize) / 2
+        y: service.circleInset + (cornerWindow.height - service.hitSize) / 2
         width: service.circleSize
         height: service.circleSize
         radius: width / 2
-        readonly property bool pressedInside: closeTap.pressed
-          && closeTap.point.position.x >= 0 && closeTap.point.position.y >= 0
-          && closeTap.point.position.x <= width && closeTap.point.position.y <= height
+        readonly property bool pressedInside: tap.pressed
+          && tap.point.position.x >= 0 && tap.point.position.y >= 0
+          && tap.point.position.x <= width && tap.point.position.y <= height
         readonly property color pressedFillColor: service.mixColor(service.circleColor, Color.background, 0.5)
         readonly property color hoverFillColor: service.mixColor(pressedFillColor, Color.background, 0.5)
-        color: pressedInside ? pressedFillColor : (closeInnerHover.hovered ? hoverFillColor : Color.background)
-        border.color: closeWin.isActiveWindow ? service.circleColor : service.inactiveBorderColor
+        color: pressedInside ? pressedFillColor : (innerHover.hovered ? hoverFillColor : Color.background)
+        border.color: cornerWindow.isActiveWindow ? service.circleColor : service.inactiveBorderColor
         border.width: service.borderSize
-        opacity: (closeHover.hovered && !closeWin.forceHidden) ? 1 : 0
-        scale: closeHover.hovered ? 1 : 0.7
+        opacity: (hover.hovered && !cornerWindow.forceHidden) ? 1 : 0
+        scale: hover.hovered ? 1 : 0.7
 
         Behavior on opacity { NumberAnimation { duration: 120; easing.type: Easing.OutQuad } }
         Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutQuad } }
         Behavior on color { ColorAnimation { duration: 80 } }
 
         HoverHandler {
-          id: closeInnerHover
+          id: innerHover
           cursorShape: Qt.PointingHandCursor
           onHoveredChanged: {
-            if (!hovered || !closeWin.modelData) return
-            var addr = closeWin.modelData.address
+            if (!hovered || !cornerWindow.modelData) return
+            var addr = cornerWindow.modelData.address
             if (Hyprland.activeToplevel && Hyprland.activeToplevel.address === addr) return
             service.focusWindow(addr)
           }
         }
 
         TapHandler {
-          id: closeTap
-          acceptedButtons: Qt.LeftButton
+          id: tap
+          acceptedButtons: Qt.LeftButton | Qt.RightButton
+          // ReleaseWithinBounds keeps this grab (and point tracking) through
+          // the whole drag even once the pointer leaves the circle.
           gesturePolicy: TapHandler.ReleaseWithinBounds
-          onTapped: service.closeWindow(closeWin.modelData.address)
+
+          // All logic happens here, at press and release, so we don't depend
+          // on TapHandler's own onTapped/vs-pressedChanged signal ordering.
+          //   • press            → begin drag tracking
+          //   • release + drag   → move the window
+          //   • release + tap    → fire the button action for the pressed
+          //                        button: left toggles float, right closes
           onPressedChanged: {
             if (pressed) {
               service.dragging = true
-              service.dragStartX = closeTap.point.position.x + closeCircle.x + closeWin.x
-              service.dragStartY = closeTap.point.position.y + closeCircle.y + closeWin.y
-              service.dragModel = closeWin.modelData
-              if (closeWin.info && closeWin.info.at) {
-                service.dragWinOrigX = closeWin.info.at[0]
-                service.dragWinOrigY = closeWin.info.at[1]
+              service.dragButton = tap.point.buttons
+              service.dragStartX = tap.point.position.x + circle.x + cornerWindow.x
+              service.dragStartY = tap.point.position.y + circle.y + cornerWindow.y
+              service.dragModel = cornerWindow.modelData
+              if (cornerWindow.info && cornerWindow.info.at) {
+                service.dragWinOrigX = cornerWindow.info.at[0]
+                service.dragWinOrigY = cornerWindow.info.at[1]
               }
               return
             }
-            // Released — check if this was a drag or a tap.
-            var dx = closeTap.point.position.x + closeCircle.x + closeWin.x - service.dragStartX
-            var dy = closeTap.point.position.y + closeCircle.y + closeWin.y - service.dragStartY
-            if (Math.sqrt(dx * dx + dy * dy) > service.dragThreshold) {
+            // Released.
+            service.dragging = false
+            var dx = tap.point.position.x + circle.x + cornerWindow.x - service.dragStartX
+            var dy = tap.point.position.y + circle.y + cornerWindow.y - service.dragStartY
+            var isDrag = Math.sqrt(dx * dx + dy * dy) > service.dragThreshold
+
+            if (isDrag) {
               var newX = Math.round(service.dragWinOrigX + dx)
               var newY = Math.round(service.dragWinOrigY + dy)
               var addr = service.normalizedAddress(service.dragModel.address)
               Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.move({ address = \"" + addr + "\", x = " + newX + ", y = " + newY + " })"])
+            } else if (service.dragButton === Qt.RightButton) {
+              service.closeWindow(cornerWindow.modelData.address)
+            } else {
+              service.toggleWindow(cornerWindow.modelData.address)
             }
-            service.dragging = false
+
+            service.dragButton = Qt.NoButton
             // Hide when the pointer drifted outside the hit area.
-            var absX = closeCircle.x + closeTap.point.position.x
-            var absY = closeCircle.y + closeTap.point.position.y
-            if (absX < 0 || absY < 0 || absX > closeWin.width || absY > closeWin.height) {
-              closeWin.forceHidden = true
+            var absX = circle.x + tap.point.position.x
+            var absY = circle.y + tap.point.position.y
+            if (absX < 0 || absY < 0 || absX > cornerWindow.width || absY > cornerWindow.height) {
+              cornerWindow.forceHidden = true
             }
           }
         }
@@ -304,123 +320,6 @@ Item {
           text: "✕"
           color: service.glyphColor
           font.pixelSize: parent.width * 0.6
-          font.bold: true
-        }
-      }
-    }
-
-    // ─── toggle-float button (top-left) ───────────────────────────────
-    PanelWindow {
-      id: toggleWin
-      required property var modelData
-
-      readonly property var info: modelData ? modelData.lastIpcObject : null
-      readonly property var targetScreen: service.screenForMonitor(modelData ? modelData.monitor : null)
-      readonly property bool onActiveWorkspace: modelData !== null && modelData.workspace !== null
-        && (modelData.workspace.active === true || (info !== null && info.pinned === true))
-      readonly property bool showable: onActiveWorkspace
-        && info !== null && info.mapped !== false && info.hidden !== true
-        && info.at && info.at.length === 2 && info.size && info.size.length === 2
-        && targetScreen !== null
-      readonly property bool isActiveWindow: modelData !== null && Hyprland.activeToplevel !== null
-        && Hyprland.activeToplevel.address === modelData.address
-      property bool forceHidden: false
-
-      screen: targetScreen
-      visible: showable
-      color: "transparent"
-
-      WlrLayershell.namespace: "omarchy-window-toggle-button"
-      WlrLayershell.layer: WlrLayer.Overlay
-      WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
-      exclusionMode: ExclusionMode.Ignore
-
-      implicitWidth: service.dragging ? service.expandedSize : service.hitSize
-      implicitHeight: service.dragging ? service.expandedSize : service.hitSize
-
-      anchors { left: true; top: true }
-      margins.left: showable ? Math.round(info.at[0] - targetScreen.x - toggleWin.width / 2) : 0
-      margins.top: showable ? Math.round(info.at[1] - targetScreen.y - toggleWin.height / 2) : 0
-
-      HoverHandler {
-        id: toggleHover
-        onHoveredChanged: if (hovered) toggleWin.forceHidden = false
-      }
-
-      Rectangle {
-        id: toggleCircle
-        // Anchor to the top-left corner of the window — mirrors the close
-        // button's approach so the button stays put during drag expansion.
-        x: service.circleInset + (toggleWin.width - service.hitSize) / 2
-        y: service.circleInset + (toggleWin.height - service.hitSize) / 2
-        width: service.circleSize
-        height: service.circleSize
-        radius: width / 2
-        readonly property bool pressedInside: toggleTap.pressed
-          && toggleTap.point.position.x >= 0 && toggleTap.point.position.y >= 0
-          && toggleTap.point.position.x <= width && toggleTap.point.position.y <= height
-        readonly property color pressedFillColor: service.mixColor(service.circleColor, Color.background, 0.5)
-        readonly property color hoverFillColor: service.mixColor(pressedFillColor, Color.background, 0.5)
-        color: pressedInside ? pressedFillColor : (toggleInnerHover.hovered ? hoverFillColor : Color.background)
-        border.color: toggleWin.isActiveWindow ? service.circleColor : service.inactiveBorderColor
-        border.width: service.borderSize
-        opacity: (toggleHover.hovered && !toggleWin.forceHidden) ? 1 : 0
-        scale: toggleHover.hovered ? 1 : 0.7
-
-        Behavior on opacity { NumberAnimation { duration: 120; easing.type: Easing.OutQuad } }
-        Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutQuad } }
-        Behavior on color { ColorAnimation { duration: 80 } }
-
-        HoverHandler {
-          id: toggleInnerHover
-          cursorShape: Qt.PointingHandCursor
-          onHoveredChanged: {
-            if (!hovered || !toggleWin.modelData) return
-            var addr = toggleWin.modelData.address
-            if (Hyprland.activeToplevel && Hyprland.activeToplevel.address === addr) return
-            service.focusWindow(addr)
-          }
-        }
-
-        TapHandler {
-          id: toggleTap
-          acceptedButtons: Qt.LeftButton
-          gesturePolicy: TapHandler.ReleaseWithinBounds
-          onTapped: service.toggleWindow(toggleWin.modelData.address)
-          onPressedChanged: {
-            if (pressed) {
-              service.dragging = true
-              service.dragStartX = toggleTap.point.position.x + toggleCircle.x + toggleWin.x
-              service.dragStartY = toggleTap.point.position.y + toggleCircle.y + toggleWin.y
-              service.dragModel = toggleWin.modelData
-              if (toggleWin.info && toggleWin.info.at) {
-                service.dragWinOrigX = toggleWin.info.at[0]
-                service.dragWinOrigY = toggleWin.info.at[1]
-              }
-              return
-            }
-            var dx = toggleTap.point.position.x + toggleCircle.x + toggleWin.x - service.dragStartX
-            var dy = toggleTap.point.position.y + toggleCircle.y + toggleWin.y - service.dragStartY
-            if (Math.sqrt(dx * dx + dy * dy) > service.dragThreshold) {
-              var newX = Math.round(service.dragWinOrigX + dx)
-              var newY = Math.round(service.dragWinOrigY + dy)
-              var addr = service.normalizedAddress(service.dragModel.address)
-              Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.move({ address = \"" + addr + "\", x = " + newX + ", y = " + newY + " })"])
-            }
-            service.dragging = false
-            var absX = toggleCircle.x + toggleTap.point.position.x
-            var absY = toggleCircle.y + toggleTap.point.position.y
-            if (absX < 0 || absY < 0 || absX > toggleWin.width || absY > toggleWin.height) {
-              toggleWin.forceHidden = true
-            }
-          }
-        }
-
-        Text {
-          anchors.centerIn: parent
-          text: "◇"
-          color: service.glyphColor
-          font.pixelSize: parent.width * 0.55
           font.bold: true
         }
       }
