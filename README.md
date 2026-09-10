@@ -15,18 +15,7 @@ Hover a window's top-right corner and a small solid circle appears. It does two 
 
 ## See it in action
 
-```
-  ┌──────────────────────────────┐
-  │                          ●  │  ← hover to reveal
-  │                              │
-  │   your window goes here      │
-  │                              │
-  │                              │
-  └──────────────────────────────┘
-
-  click ● (left)   → toggles float/tiling
-  click ● (right)  → closes the window
-```
+![preview](preview.jpg)
 
 ## Install
 
