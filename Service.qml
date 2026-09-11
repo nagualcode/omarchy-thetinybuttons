@@ -150,6 +150,7 @@ Item {
   // started from a button. The next tap anywhere on the monitor releases.
   property string dragAddr: ""
   property bool dragPrimed: false
+  property bool dragWasFloating: false
   property var dragTargetScreen: null
   property real dragLastX: 0
   property real dragLastY: 0
@@ -160,25 +161,41 @@ Item {
   function moveWindowRelative(addr, dx, dy) {
     var normalized = service.normalizedAddress(addr)
     if (!normalized) return
-    Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.move({ x = " + dx + ", y = " + dy + ", relative = true, window = \"address:" + normalized + "\" })"])
+    if (service.dragWasFloating) {
+      // Floating window: free-form relative move.
+      Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.move({ x = " + dx + ", y = " + dy + ", relative = true, window = \"address:" + normalized + "\" })"])
+    } else {
+      // Tiled window: dispatch movewindow in the dominant axis direction.
+      // movewindow rearranges other tiles proportionally without floating.
+      if (Math.abs(dx) < 2 && Math.abs(dy) < 2) return
+      var dir = Math.abs(dx) >= Math.abs(dy)
+        ? (dx > 0 ? "r" : "l")
+        : (dy > 0 ? "d" : "u")
+      Quickshell.execDetached(["hyprctl", "dispatch", "movewindow", dir])
+    }
   }
 
-  function startWindowDrag(addr, screen) {
+function startWindowDrag(addr, screen, isFloating) {
     var normalized = service.normalizedAddress(addr)
     if (!normalized || service.dragging) return
     service.dragAddr = normalized
     service.dragTargetScreen = screen
+    service.dragWasFloating = isFloating
     service.dragPrimed = false
-    // Match SUPER+drag feel: elevate and float the window first.
     Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.bring_to_top({ window = \"address:" + normalized + "\" })"])
-    Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.float({ action = \"set\", window = \"address:" + normalized + "\" })"])
-    service.dbg("DRAG START addr=" + normalized)
+    if (isFloating) {
+      Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.float({ action = \"set\", window = \"address:" + normalized + "\" })"])
+    }
+    service.dbg("DRAG START addr=" + normalized + " floating=" + isFloating)
     glueTimer.restart()
     followTimer.restart()
   }
 
-  function endWindowDrag() {
+function endWindowDrag() {
     if (!service.dragging) return
+    if (!service.dragWasFloating) {
+      Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.float({ action = \"unset\", window = \"address:" + service.dragAddr + "\" })"])
+    }
     service.dragAddr = ""
     service.dragTargetScreen = null
     service.dbg("DRAG END")
@@ -401,7 +418,14 @@ Item {
               return
             }
             if (btn === Qt.MiddleButton) {
-              service.startWindowDrag(cornerWindow.modelData.address, cornerWindow.targetScreen)
+              service.startWindowDrag(
+                cornerWindow.modelData.address,
+                cornerWindow.targetScreen,
+                cornerWindow.modelData.lastIpcObject
+                  ? cornerWindow.modelData.lastIpcObject.floating === true
+                  : false
+              )
+            }
             }
           }
         }
