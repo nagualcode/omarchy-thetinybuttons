@@ -426,7 +426,6 @@ function endWindowDrag() {
                   : false
               )
             }
-            }
           }
         }
       }
