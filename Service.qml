@@ -165,13 +165,14 @@ Item {
       // Floating window: free-form relative move.
       Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.move({ x = " + dx + ", y = " + dy + ", relative = true, window = \"address:" + normalized + "\" })"])
     } else {
-      // Tiled window: dispatch movewindow in the dominant axis direction.
-      // movewindow rearranges other tiles proportionally without floating.
+      // Tiled window: move it in the dominant axis's direction. The Lua
+      // dispatcher hl.dsp.window.move accepts a `direction` argument —
+      // it rearranges other tiles in the layout without floating.
       if (Math.abs(dx) < 2 && Math.abs(dy) < 2) return
       var dir = Math.abs(dx) >= Math.abs(dy)
         ? (dx > 0 ? "r" : "l")
         : (dy > 0 ? "d" : "u")
-      Quickshell.execDetached(["hyprctl", "dispatch", "movewindow", dir])
+      Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.move({ direction = \"" + dir + "\", window = \"address:" + normalized + "\" })"])
     }
   }
 
