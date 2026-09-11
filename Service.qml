@@ -3,6 +3,8 @@
 // One button on the top-right corner of every window:
 //   • Left-click  (primary) → toggle between tiling and float mode
 //   • Right-click (context) → close the window
+//   • 3-finger tap → enter drag mode: the window follows the cursor;
+//     tap anywhere on the monitor to drop it.
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -135,13 +137,142 @@ Item {
     return null
   }
 
-  // Poll toplevel geometry so buttons stay glued as windows move/resize.
+  // ── debug logging (tail journalctl or the per-run log.qslog) ───────
+  function dbg(msg) {
+    console.log("[TINYBTN] " + msg)
+  }
+
+  // ── drag mode (3-finger tap on button → move → tap to drop) ─────────
+  // A 3-finger tap (middle click) on a button pins the window to the
+  // cursor. While active, a full-screen overlay tracks the pointer and the
+  // window follows via hl.dsp.window.move({ relative, x, y }) — the native
+  // window.drag()/bindm APIs require a held mouse-bind, so they can't be
+  // started from a button. The next tap anywhere on the monitor releases.
+  property string dragAddr: ""
+  property bool dragPrimed: false
+  property var dragTargetScreen: null
+  property real dragLastX: 0
+  property real dragLastY: 0
+  readonly property bool dragging: service.dragAddr !== ""
+  readonly property int pollFastInterval: 80
+  readonly property int pollInterval: 400
+
+  function moveWindowRelative(addr, dx, dy) {
+    var normalized = service.normalizedAddress(addr)
+    if (!normalized) return
+    Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.move({ x = " + dx + ", y = " + dy + ", relative = true, window = \"address:" + normalized + "\" })"])
+  }
+
+  function startWindowDrag(addr, screen) {
+    var normalized = service.normalizedAddress(addr)
+    if (!normalized || service.dragging) return
+    service.dragAddr = normalized
+    service.dragTargetScreen = screen
+    service.dragPrimed = false
+    // Match SUPER+drag feel: elevate and float the window first.
+    Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.bring_to_top({ window = \"address:" + normalized + "\" })"])
+    Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.float({ action = \"set\", window = \"address:" + normalized + "\" })"])
+    service.dbg("DRAG START addr=" + normalized)
+    glueTimer.restart()
+    followTimer.restart()
+  }
+
+  function endWindowDrag() {
+    if (!service.dragging) return
+    service.dragAddr = ""
+    service.dragTargetScreen = null
+    service.dbg("DRAG END")
+    followTimer.stop()
+    glueTimer.restart()
+  }
+
+  function onCursorPos(x, y) {
+    if (!service.dragging) return
+    if (service.dragPrimed) {
+      var dx = x - service.dragLastX
+      var dy = y - service.dragLastY
+      if (Math.abs(dx) >= 0.35 || Math.abs(dy) >= 0.35) {
+        service.dbg("DRAG follow " + dx.toFixed(2) + "," + dy.toFixed(2))
+        service.moveWindowRelative(service.dragAddr, dx.toFixed(2), dy.toFixed(2))
+      }
+    }
+    service.dragLastX = x
+    service.dragLastY = y
+    service.dragPrimed = true
+  }
+
   Timer {
-    interval: 400
+    id: followTimer
+    interval: 24
+    repeat: true
+    running: false
+    onTriggered: {
+      if (!service.dragging) { followTimer.stop(); return }
+      cursorPosProc.running = false
+      cursorPosProc.running = true
+    }
+  }
+
+  // Poll toplevel geometry so buttons stay glued as windows move/resize.
+  // Polls faster while a drag mode is active (the window moves live).
+  Timer {
+    id: glueTimer
+    interval: service.dragging ? service.pollFastInterval : service.pollInterval
     running: true
     repeat: true
     triggeredOnStart: true
     onTriggered: Hyprland.refreshToplevels()
+  }
+
+  // ── drag-mode overlay ───────────────────────────────────────────────
+  // Declared last so it maps on top of every button surface. While a
+  // window is being dragged it covers the monitor: a full-screen overlay
+  // window receives any tap (any button) to release the window, and a
+  // 24ms Process polls `hyprctl cursorpos` to stream relative moves to
+  // the dragged window. HoverHandler is not used because its position
+  // reports (0,0) in overlay PanelWindows on this Qt/Wayland build.
+  PanelWindow {
+    id: dragOverlay
+    readonly property var targetScreen: service.dragTargetScreen
+
+    screen: targetScreen
+    visible: service.dragging
+    color: "transparent"
+    anchors { right: true; top: true }
+    implicitWidth: targetScreen ? targetScreen.width : 0
+    implicitHeight: targetScreen ? targetScreen.height : 0
+
+    WlrLayershell.namespace: "omarchy-tinybuttons"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+    exclusionMode: ExclusionMode.Ignore
+
+    TapHandler {
+      id: dropTap
+      acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+      gesturePolicy: TapHandler.ReleaseWithinBounds
+      onPressedChanged: if (!pressed) service.endWindowDrag()
+    }
+  }
+
+  // Persistent Process used exclusively for cursor position polling
+  // during drag mode. hyprctl cursorpos returns instantly, and
+  // StdioCollector captures the "X, Y\n" line once the process exits.
+  Process {
+    id: cursorPosProc
+    command: ["hyprctl", "cursorpos"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var raw = (text || "").trim()
+        var comma = raw.indexOf(",")
+        if (comma < 1) return
+        var x = parseFloat(raw.substring(0, comma))
+        var y = parseFloat(raw.substring(comma + 1))
+        if (!isFinite(x) || !isFinite(y)) return
+        service.onCursorPos(x, y)
+      }
+    }
   }
 
   // ── per-window button (top-right) ───────────────────────────────────
@@ -162,6 +293,7 @@ Item {
         && targetScreen !== null
       readonly property bool isActiveWindow: modelData !== null && Hyprland.activeToplevel !== null
         && Hyprland.activeToplevel.address === modelData.address
+      property bool forceHidden: false
 
       // Hyprland reports window position in global coordinates, but some
       // builds report monitor-relative values; normalize to global so the
@@ -214,8 +346,7 @@ Item {
         height: service.circleSize
         radius: width / 2
         readonly property bool pressPointInside:
-          (toggleTap.pressed && pointFits(toggleTap.point.position))
-          || (closeTap.pressed && pointFits(closeTap.point.position))
+          tap.pressed && pointFits(tap.point.position)
         function pointFits(p) {
           return p.x >= 0 && p.y >= 0 && p.x <= width && p.y <= height
         }
@@ -244,31 +375,39 @@ Item {
         }
 
         TapHandler {
-          id: toggleTap
-          acceptedButtons: Qt.LeftButton
+          id: tap
+          acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
           gesturePolicy: TapHandler.ReleaseWithinBounds
+          property int heldButton: Qt.NoButton
 
-          // Left-click (or one-finger tap): toggle float/tiling.
+          // Button actions (tap without prior drag):
+          //   left/1-finger → toggle float; right/2-finger → close;
+          //   middle/3-finger → enter drag mode (move the window, tap to drop).
           onPressedChanged: {
-            if (toggleTap.pressed) return
-            service.toggleWindow(cornerWindow.modelData.address)
-            cornerWindow.maybeHideOutside(toggleTap.point.position)
-          }
-        }
-
-        TapHandler {
-          id: closeTap
-          acceptedButtons: Qt.RightButton
-          gesturePolicy: TapHandler.ReleaseWithinBounds
-
-          // Right-click (or two-finger tap): close the window.
-          onPressedChanged: {
-            if (closeTap.pressed) return
-            service.closeWindow(cornerWindow.modelData.address)
-            cornerWindow.maybeHideOutside(closeTap.point.position)
+            if (tap.pressed) {
+              tap.heldButton = tap.point.pressedButtons
+              return
+            }
+            var btn = tap.heldButton
+            tap.heldButton = Qt.NoButton
+            if (btn & Qt.RightButton) {
+              service.closeWindow(cornerWindow.modelData.address)
+              cornerWindow.maybeHideOutside(tap.point.position)
+              return
+            }
+            if (btn & Qt.LeftButton) {
+              service.toggleWindow(cornerWindow.modelData.address)
+              cornerWindow.maybeHideOutside(tap.point.position)
+              return
+            }
+            if (btn === Qt.MiddleButton) {
+              service.startWindowDrag(cornerWindow.modelData.address, cornerWindow.targetScreen)
+            }
           }
         }
       }
     }
+
+    // Full-screen drag-mode overlay — see the service-level dragOverlay.
   }
 }
