@@ -75,9 +75,30 @@ Item {
     }
   }
 
+  // Whether the touchpad uses natural (inverted) scroll. When enabled,
+  // the tiled drag direction is mirrored so the window follows the
+  // fingers like it would in a natural-scroll setup.
+  property bool naturalScroll: false
+  Process {
+    id: naturalScrollProc
+    command: ["hyprctl", "-j", "getoption", "input:touchpad:natural_scroll"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var json = JSON.parse(text || "{}")
+          service.naturalScroll = json.bool === true
+          service.dbg("naturalScroll=" + service.naturalScroll)
+        } catch (e) {
+        }
+      }
+    }
+  }
+
   Component.onCompleted: {
     gapsInProc.running = true
     inactiveBorderProc.running = true
+    naturalScrollProc.running = true
   }
 
   // ── theme-aware colors ──────────────────────────────────────────────
@@ -169,14 +190,15 @@ Item {
       // dispatcher hl.dsp.window.move accepts a `direction` argument —
       // it rearranges other tiles in the layout without floating.
       if (Math.abs(dx) < 2 && Math.abs(dy) < 2) return
+      var inv = service.naturalScroll
       var dir = Math.abs(dx) >= Math.abs(dy)
-        ? (dx > 0 ? "r" : "l")
-        : (dy > 0 ? "d" : "u")
+        ? (dx > 0 ? (inv ? "l" : "r") : (inv ? "r" : "l"))
+        : (dy > 0 ? (inv ? "u" : "d") : (inv ? "d" : "u"))
       Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.move({ direction = \"" + dir + "\", window = \"address:" + normalized + "\" })"])
     }
   }
 
-function startWindowDrag(addr, screen, isFloating) {
+  function startWindowDrag(addr, screen, isFloating) {
     var normalized = service.normalizedAddress(addr)
     if (!normalized || service.dragging) return
     service.dragAddr = normalized
@@ -189,10 +211,10 @@ function startWindowDrag(addr, screen, isFloating) {
     }
     service.dbg("DRAG START addr=" + normalized + " floating=" + isFloating)
     glueTimer.restart()
-    followTimer.restart()
+    cursorPosProcA.running = true
   }
 
-function endWindowDrag() {
+  function endWindowDrag() {
     if (!service.dragging) return
     if (!service.dragWasFloating) {
       Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.float({ action = \"unset\", window = \"address:" + service.dragAddr + "\" })"])
@@ -200,7 +222,8 @@ function endWindowDrag() {
     service.dragAddr = ""
     service.dragTargetScreen = null
     service.dbg("DRAG END")
-    followTimer.stop()
+    cursorPosProcA.running = false
+    cursorPosProcB.running = false
     glueTimer.restart()
   }
 
@@ -219,17 +242,10 @@ function endWindowDrag() {
     service.dragPrimed = true
   }
 
-  Timer {
-    id: followTimer
-    interval: 24
-    repeat: true
-    running: false
-    onTriggered: {
-      if (!service.dragging) { followTimer.stop(); return }
-      cursorPosProc.running = false
-      cursorPosProc.running = true
-    }
-  }
+  // Cursor polling chain runs continuously while dragging: cursorPosProcA
+  // runs, its onStreamFinished starts cursorPosProcB, whose onStreamFinished
+  // starts A again. This self-staggers the polls and avoids the kill/restart
+  // race of a single Process (which produced huge spurious deltas).
 
   // Poll toplevel geometry so buttons stay glued as windows move/resize.
   // Polls faster while a drag mode is active (the window moves live).
@@ -273,22 +289,38 @@ function endWindowDrag() {
     }
   }
 
-  // Persistent Process used exclusively for cursor position polling
-  // during drag mode. hyprctl cursorpos returns instantly, and
-  // StdioCollector captures the "X, Y\n" line once the process exits.
+  function parseCursorPos(raw) {
+    var s = String(raw || "").trim()
+    var c = s.indexOf(",")
+    if (c < 1) return null
+    var x = parseFloat(s.substring(0, c))
+    var y = parseFloat(s.substring(c + 1))
+    if (!isFinite(x) || !isFinite(y)) return null
+    return [x, y]
+  }
+
   Process {
-    id: cursorPosProc
+    id: cursorPosProcA
     command: ["hyprctl", "cursorpos"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var raw = (text || "").trim()
-        var comma = raw.indexOf(",")
-        if (comma < 1) return
-        var x = parseFloat(raw.substring(0, comma))
-        var y = parseFloat(raw.substring(comma + 1))
-        if (!isFinite(x) || !isFinite(y)) return
-        service.onCursorPos(x, y)
+        var p = service.parseCursorPos(text)
+        if (p) service.onCursorPos(p[0], p[1])
+        if (service.dragging) cursorPosProcB.running = true
+      }
+    }
+  }
+
+  Process {
+    id: cursorPosProcB
+    command: ["hyprctl", "cursorpos"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var p = service.parseCursorPos(text)
+        if (p) service.onCursorPos(p[0], p[1])
+        if (service.dragging) cursorPosProcA.running = true
       }
     }
   }
