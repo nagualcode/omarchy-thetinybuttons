@@ -164,17 +164,21 @@ Item {
   }
 
   // ── drag mode (3-finger tap on button → move → tap to drop) ─────────
-  // A 3-finger tap (middle click) on a button pins the window to the
-  // cursor. While active, a full-screen overlay tracks the pointer and the
-  // window follows via hl.dsp.window.move({ relative, x, y }) — the native
-  // window.drag()/bindm APIs require a held mouse-bind, so they can't be
-  // started from a button. The next tap anywhere on the monitor releases.
+  // A 3-finger tap (middle click) on a button floats the window, warps the
+  // pointer to its center, and pins it to the cursor. While active, the
+  // window follows the pointer via hl.dsp.window.move({ relative, x, y }) —
+  // the native window.drag()/bindm APIs require a held mouse-bind, so they
+  // can't be started from a button. The next tap anywhere on the monitor
+  // releases; the window stays floating.
   property string dragAddr: ""
   property bool dragPrimed: false
-  property bool dragWasFloating: false
   property var dragTargetScreen: null
   property real dragLastX: 0
   property real dragLastY: 0
+  // Cursor is warped to the window's center on drag start; polls within this
+  // window only re-prime tracking so the pre-warp -> center jump never
+  // dispatches a ghost move.
+  property double dragWarpUntil: 0
   readonly property bool dragging: service.dragAddr !== ""
   readonly property int pollFastInterval: 80
   readonly property int pollInterval: 400
@@ -182,43 +186,40 @@ Item {
   function moveWindowRelative(addr, dx, dy) {
     var normalized = service.normalizedAddress(addr)
     if (!normalized) return
-    if (service.dragWasFloating) {
-      // Floating window: free-form relative move.
-      Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.move({ x = " + dx + ", y = " + dy + ", relative = true, window = \"address:" + normalized + "\" })"])
-    } else {
-      // Tiled window: move it in the dominant axis's direction. The Lua
-      // dispatcher hl.dsp.window.move accepts a `direction` argument —
-      // it rearranges other tiles in the layout without floating.
-      if (Math.abs(dx) < 2 && Math.abs(dy) < 2) return
-      var inv = service.naturalScroll
-      var dir = Math.abs(dx) >= Math.abs(dy)
-        ? (dx > 0 ? (inv ? "l" : "r") : (inv ? "r" : "l"))
-        : (dy > 0 ? (inv ? "u" : "d") : (inv ? "d" : "u"))
-      Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.move({ direction = \"" + dir + "\", window = \"address:" + normalized + "\" })"])
-    }
+    Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.move({ x = " + dx + ", y = " + dy + ", relative = true, window = \"address:" + normalized + "\" })"])
   }
 
-  function startWindowDrag(addr, screen, isFloating) {
+  function startWindowDrag(addr, screen, info) {
     var normalized = service.normalizedAddress(addr)
     if (!normalized || service.dragging) return
     service.dragAddr = normalized
     service.dragTargetScreen = screen
-    service.dragWasFloating = isFloating
     service.dragPrimed = false
     Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.bring_to_top({ window = \"address:" + normalized + "\" })"])
-    if (isFloating) {
+    // Always float the window, unless it is already floating (calling set on an
+    // already-floated window toggles it back to tiled).
+    if (!info || info.floating !== true) {
       Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.float({ action = \"set\", window = \"address:" + normalized + "\" })"])
     }
-    service.dbg("DRAG START addr=" + normalized + " floating=" + isFloating)
+    // Warp the pointer to the window's center, mirroring Hyprland's native
+    // SUPER+drag grab, so follow-up pointer motion yields precise movement.
+    var at = info && info.at ? info.at : null
+    var size = info && info.size ? info.size : null
+    if (at && size && screen) {
+      var gx = at[0] < screen.x ? at[0] + screen.x : at[0]
+      var gy = at[1] < screen.y ? at[1] + screen.y : at[1]
+      var cx = Math.round(gx + size[0] / 2)
+      var cy = Math.round(gy + size[1] / 2)
+      Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.cursor.move({ x = " + cx + ", y = " + cy + " })"])
+      service.dragWarpUntil = Date.now() + 100
+    }
+    service.dbg("DRAG START addr=" + normalized + " floating=true")
     glueTimer.restart()
     cursorPosProcA.running = true
   }
 
   function endWindowDrag() {
     if (!service.dragging) return
-    if (!service.dragWasFloating) {
-      Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.float({ action = \"unset\", window = \"address:" + service.dragAddr + "\" })"])
-    }
     service.dragAddr = ""
     service.dragTargetScreen = null
     service.dbg("DRAG END")
@@ -229,6 +230,12 @@ Item {
 
   function onCursorPos(x, y) {
     if (!service.dragging) return
+    if (Date.now() < service.dragWarpUntil) {
+      service.dragLastX = x
+      service.dragLastY = y
+      service.dragPrimed = false
+      return
+    }
     if (service.dragPrimed) {
       var dx = x - service.dragLastX
       var dy = y - service.dragLastY
@@ -455,8 +462,6 @@ Item {
                 cornerWindow.modelData.address,
                 cornerWindow.targetScreen,
                 cornerWindow.modelData.lastIpcObject
-                  ? cornerWindow.modelData.lastIpcObject.floating === true
-                  : false
               )
             }
           }
