@@ -30,9 +30,10 @@ Item {
   readonly property int circlePad: Math.round(service.circleRadius / 3)
   // The invisible hit/hover box (revealed on hover).
   readonly property int hitSize: 2 * (service.circleRadius + service.circlePad) + 8
-  // Edge buttons: a small square (smaller than the corner circle) centered
-  // on each edge of the focused tiled window.
-  readonly property int edgeButtonSize: Math.max(3, Math.round(service.circleSize * 0.05))
+  // Edge buttons: a small arrow at the middle of each edge of the focused
+  // tiled window, pointing toward the edge it belongs to. Sized from the
+  // hit box so it stays legible but never overflows the edge gap.
+  readonly property int edgeArrowSize: Math.max(8, Math.round(service.hitSize * 0.45))
 
   // ── live Hyprland config ────────────────────────────────────────────
   Process {
@@ -123,8 +124,41 @@ Item {
     }
   }
 
+  // "general:gaps_out" — the space between tiled windows and the screen
+  // edge. A window whose edge is within gaps_out + gaps_in + border of the
+  // screen edge cannot move further in that direction (it is already the
+  // last tile in the row/column), so its edge button is hidden.
+  property int gapsOut: 4
+  Process {
+    id: gapsOutProc
+    command: ["hyprctl", "-j", "getoption", "general:gaps_out"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var json = JSON.parse(text || "{}")
+          var parts = String(json.css || "").match(/-?\d+(?:\.\d+)?/g) || []
+          var n = parts.length > 0 ? Number(parts[0]) : Number(json.int)
+          if (isFinite(n) && n >= 0) service.gapsOut = n
+        } catch (e) {
+        }
+      }
+    }
+  }
+
+  // Distance (px) that counts as "flush against the screen edge": tiled
+  // windows end gaps_out + border_size short of the screen edge, so those
+  // with less room than gaps_out + gaps_in + border are at the end of a
+  // row/column and cannot be swapped further in that direction.
+  readonly property int edgeFlushTolerance: Math.max(4, service.gapsIn + service.gapsOut + 2)
+
+  // Incremented every toplevel refresh so computed bindings (the per-editor
+  // "only window on the workspace" count) re-evaluate along with the model.
+  property int refreshTick: 0
+
   Component.onCompleted: {
     gapsInProc.running = true
+    gapsOutProc.running = true
     inactiveBorderProc.running = true
     naturalScrollProc.running = true
     focusedProc.running = true
@@ -401,7 +435,10 @@ Item {
     running: true
     repeat: true
     triggeredOnStart: true
-    onTriggered: Hyprland.refreshToplevels()
+    onTriggered: {
+      Hyprland.refreshToplevels()
+      service.refreshTick++
+    }
   }
 
   // ── drag-mode overlay ───────────────────────────────────────────────
@@ -631,7 +668,33 @@ Item {
           && (modelData.workspace.active === true || (info !== null && info.pinned === true))
         readonly property bool isActiveWindow: modelData !== null && service.focusedAddress !== ""
           && service.normalizedAddress(modelData.address) === service.focusedAddress
+        // Number of tiled windows on the window's (active) workspace. When
+        // only one tiled window is on the workspace there is nothing to swap
+        // with, so the move buttons must never appear — a lone tile floating
+        // in a sea of floating windows still has no swap partner.
+        readonly property int activeWorkspaceWindows: {
+          var _ = service.refreshTick
+          var ts = Hyprland.toplevels.values
+          var n = 0
+          for (var i = 0; i < ts.length; i++) {
+            var t = ts[i]
+            if (!t || !t.workspace || t.workspace.active !== true) continue
+            var o = t.lastIpcObject
+            if (o && o.mapped !== false && o.hidden !== true && o.floating !== true) n++
+          }
+          return n
+        }
+        // A window flush against a screen edge cannot be swapped further in
+        // that direction, so its edge button is hidden — even while the
+        // cursor is near that edge.
+        readonly property bool canMoveLeft: g !== null && g.x - edgeScreen.x > service.edgeFlushTolerance
+        readonly property bool canMoveRight: g !== null
+          && (edgeScreen.x + edgeScreen.width) - g.right > service.edgeFlushTolerance
+        readonly property bool canMoveTop: g !== null && g.y - edgeScreen.y > service.edgeFlushTolerance
+        readonly property bool canMoveBottom: g !== null
+          && (edgeScreen.y + edgeScreen.height) - g.bottom > service.edgeFlushTolerance
         readonly property bool showable: onActiveWorkspace && isActiveWindow
+          && activeWorkspaceWindows > 1
           && info !== null && info.mapped !== false && info.hidden !== true
           && info.floating !== true && info.fullscreen !== true
           && info.at && info.at.length === 2 && info.size && info.size.length === 2
@@ -645,7 +708,7 @@ Item {
         // ── left edge ────────────────────────────────────────────────────
         PanelWindow {
           screen: edgeScreen
-          visible: showable && nearLeft
+          visible: showable && nearLeft && canMoveLeft
           color: "transparent"
           WlrLayershell.namespace: "omarchy-tinybuttons"
           WlrLayershell.layer: WlrLayer.Overlay
@@ -658,13 +721,23 @@ Item {
           margins.left: showable ? g.x - edgeScreen.x - service.hitSize / 2 : 0
           margins.top: showable ? g.cy - edgeScreen.y - service.hitSize / 2 : 0
 
-          Rectangle {
-            width: service.edgeButtonSize
-            height: service.edgeButtonSize
-            anchors.centerIn: parent
-            color: hoverL.hovered
-              ? service.mixColor(service.mainButtonColor, Color.background, 0.35)
-              : service.mainButtonColor
+          Item {
+            width: service.edgeArrowSize
+            height: service.edgeArrowSize
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.horizontalCenterOffset: -service.edgeArrowSize / 2
+            anchors.verticalCenter: parent.verticalCenter
+
+            Text {
+              anchors.centerIn: parent
+              text: "\u2190\uFE0E"
+              font.pixelSize: service.edgeArrowSize
+              color: hoverL.hovered
+                ? service.mixColor(service.mainButtonColor, Color.background, 0.35)
+                : service.mainButtonColor
+              horizontalAlignment: Text.AlignHCenter
+              verticalAlignment: Text.AlignVCenter
+            }
 
             HoverHandler {
               id: hoverL
@@ -682,7 +755,7 @@ Item {
         // ── right edge ───────────────────────────────────────────────────
         PanelWindow {
           screen: edgeScreen
-          visible: showable && nearRight
+          visible: showable && nearRight && canMoveRight
           color: "transparent"
           WlrLayershell.namespace: "omarchy-tinybuttons"
           WlrLayershell.layer: WlrLayer.Overlay
@@ -695,13 +768,23 @@ Item {
           margins.left: showable ? g.right - edgeScreen.x - service.hitSize / 2 : 0
           margins.top: showable ? g.cy - edgeScreen.y - service.hitSize / 2 : 0
 
-          Rectangle {
-            width: service.edgeButtonSize
-            height: service.edgeButtonSize
-            anchors.centerIn: parent
-            color: hoverR.hovered
-              ? service.mixColor(service.mainButtonColor, Color.background, 0.35)
-              : service.mainButtonColor
+          Item {
+            width: service.edgeArrowSize
+            height: service.edgeArrowSize
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.horizontalCenterOffset: service.edgeArrowSize / 2
+            anchors.verticalCenter: parent.verticalCenter
+
+            Text {
+              anchors.centerIn: parent
+              text: "\u2192\uFE0E"
+              font.pixelSize: service.edgeArrowSize
+              color: hoverR.hovered
+                ? service.mixColor(service.mainButtonColor, Color.background, 0.35)
+                : service.mainButtonColor
+              horizontalAlignment: Text.AlignHCenter
+              verticalAlignment: Text.AlignVCenter
+            }
 
             HoverHandler {
               id: hoverR
@@ -719,7 +802,7 @@ Item {
         // ── top edge ─────────────────────────────────────────────────────
         PanelWindow {
           screen: edgeScreen
-          visible: showable && nearTop
+          visible: showable && nearTop && canMoveTop
           color: "transparent"
           WlrLayershell.namespace: "omarchy-tinybuttons"
           WlrLayershell.layer: WlrLayer.Overlay
@@ -732,13 +815,23 @@ Item {
           margins.left: showable ? g.cx - edgeScreen.x - service.hitSize / 2 : 0
           margins.top: showable ? g.y - edgeScreen.y - service.hitSize / 2 : 0
 
-          Rectangle {
-            width: service.edgeButtonSize
-            height: service.edgeButtonSize
-            anchors.centerIn: parent
-            color: hoverT.hovered
-              ? service.mixColor(service.mainButtonColor, Color.background, 0.35)
-              : service.mainButtonColor
+          Item {
+            width: service.edgeArrowSize
+            height: service.edgeArrowSize
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.verticalCenterOffset: -service.edgeArrowSize / 2
+
+            Text {
+              anchors.centerIn: parent
+              text: "\u2191\uFE0E"
+              font.pixelSize: service.edgeArrowSize
+              color: hoverT.hovered
+                ? service.mixColor(service.mainButtonColor, Color.background, 0.35)
+                : service.mainButtonColor
+              horizontalAlignment: Text.AlignHCenter
+              verticalAlignment: Text.AlignVCenter
+            }
 
             HoverHandler {
               id: hoverT
@@ -756,7 +849,7 @@ Item {
         // ── bottom edge ──────────────────────────────────────────────────
         PanelWindow {
           screen: edgeScreen
-          visible: showable && nearBottom
+          visible: showable && nearBottom && canMoveBottom
           color: "transparent"
           WlrLayershell.namespace: "omarchy-tinybuttons"
           WlrLayershell.layer: WlrLayer.Overlay
@@ -769,13 +862,23 @@ Item {
           margins.left: showable ? g.cx - edgeScreen.x - service.hitSize / 2 : 0
           margins.top: showable ? g.bottom - edgeScreen.y - service.hitSize / 2 : 0
 
-          Rectangle {
-            width: service.edgeButtonSize
-            height: service.edgeButtonSize
-            anchors.centerIn: parent
-            color: hoverB.hovered
-              ? service.mixColor(service.mainButtonColor, Color.background, 0.35)
-              : service.mainButtonColor
+          Item {
+            width: service.edgeArrowSize
+            height: service.edgeArrowSize
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.verticalCenterOffset: service.edgeArrowSize / 2
+
+            Text {
+              anchors.centerIn: parent
+              text: "\u2193\uFE0E"
+              font.pixelSize: service.edgeArrowSize
+              color: hoverB.hovered
+                ? service.mixColor(service.mainButtonColor, Color.background, 0.35)
+                : service.mainButtonColor
+              horizontalAlignment: Text.AlignHCenter
+              verticalAlignment: Text.AlignVCenter
+            }
 
             HoverHandler {
               id: hoverB
