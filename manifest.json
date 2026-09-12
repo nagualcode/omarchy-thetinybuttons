@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "nagualcode",
   "license": "MIT",
-  "description": "One tiny corner button: left-click toggles float/tiling, right-click closes, 3-finger tap drags the window.",
+  "description": "One tiny corner button: left-click toggles float/tiling, right-click closes, 3-finger tap drags the window. Plus hover-revealed edge buttons on tiled windows that move the tile in that direction (SUPER+SHIFT+arrow behavior).",
   "kinds": ["service"],
   "keepLoaded": true,
   "entryPoints": {

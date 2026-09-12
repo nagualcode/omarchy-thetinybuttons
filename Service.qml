@@ -30,6 +30,9 @@ Item {
   readonly property int circlePad: Math.round(service.circleRadius / 3)
   // The invisible hit/hover box (revealed on hover).
   readonly property int hitSize: 2 * (service.circleRadius + service.circlePad) + 8
+  // Edge buttons: a small square (smaller than the corner circle) centered
+  // on each edge of the focused tiled window.
+  readonly property int edgeButtonSize: Math.max(3, Math.round(service.circleSize * 0.05))
 
   // ── live Hyprland config ────────────────────────────────────────────
   Process {
@@ -46,6 +49,31 @@ Item {
         } catch (e) {
         }
       }
+    }
+  }
+
+  // ── focused-window tracking ─────────────────────────────────────────
+  // In this Omarchy build Hyprland.activeToplevel is always null and the
+  // "activewindow" raw event carries no address (only class,title), so the
+  // focused window's address is re-read from `hyprctl activewindow` every
+  // time focus changes. Stored in normalized "0x…" form.
+  property string focusedAddress: ""
+
+  function trackFocusFrom(addrJson) {
+    try {
+      var j = JSON.parse(addrJson || "{}")
+      var n = service.normalizedAddress(j && j.address ? j.address : "")
+      service.focusedAddress = n ? n : ""
+    } catch (e) {
+    }
+  }
+
+  Process {
+    id: focusedProc
+    command: ["hyprctl", "-j", "activewindow"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: service.trackFocusFrom(text)
     }
   }
 
@@ -99,6 +127,63 @@ Item {
     gapsInProc.running = true
     inactiveBorderProc.running = true
     naturalScrollProc.running = true
+    focusedProc.running = true
+  }
+
+  Connections {
+    target: Hyprland
+    function onRawEvent(event) {
+      if (event.name === "activewindow" || event.name === "activewin") {
+        focusedProc.running = true
+      }
+    }
+  }
+
+  // ── cursor proximity (edge-button reveal) ────────────────────────────
+  // Edge buttons appear only while the pointer is within a band around the
+  // edge they belong to. In this Omarchy build `hyprctl cursorpos` returns
+  // global logical coordinates (screen.universalScale, clamped to the
+  // screen's logical size), matching the window geometry space.
+  readonly property int edgeReveal: 40
+
+  property bool cursorKnown: false
+  property int cursorX: 0
+  property int cursorY: 0
+
+  function cursorNearEdge(g, screen, edge, tolerance) {
+    if (!g || !screen || !service.cursorKnown) return false
+    var t = tolerance > 0 ? tolerance : service.edgeReveal
+    var cx = service.cursorX - screen.x
+    var cy = service.cursorY - screen.y
+    if (edge === "left") return Math.abs(cx - g.x) <= t && cy >= g.y - t && cy <= g.bottom + t
+    if (edge === "right") return Math.abs(cx - g.right) <= t && cy >= g.y - t && cy <= g.bottom + t
+    if (edge === "top") return Math.abs(cy - g.y) <= t && cx >= g.x - t && cx <= g.right + t
+    if (edge === "bottom") return Math.abs(cy - g.bottom) <= t && cx >= g.x - t && cx <= g.right + t
+    return false
+  }
+
+  Process {
+    id: cursorPosProc
+    command: ["hyprctl", "cursorpos"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var p = service.parseCursorPos(text)
+        if (p) {
+          service.cursorX = p[0]
+          service.cursorY = p[1]
+          service.cursorKnown = true
+        }
+      }
+    }
+  }
+
+  Timer {
+    id: cursorEdgeTimer
+    interval: 150
+    repeat: true
+    running: true
+    onTriggered: cursorPosProc.running = true
   }
 
   // ── theme-aware colors ──────────────────────────────────────────────
@@ -107,6 +192,10 @@ Item {
   function mixColor(a, b, t) {
     return Qt.rgba(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, 1)
   }
+
+// The corner button's fill color — the edge buttons reuse it so the small
+  // squares match the main toggle button.
+  readonly property color mainButtonColor: service.circleColor
 
   // ── helpers ─────────────────────────────────────────────────────────
   // HyprlandToplevel.address is bare hex ("56538020a4f0"); normalize to
@@ -156,6 +245,56 @@ Item {
       if (screens[i].name === monitor.name) return screens[i]
     }
     return null
+  }
+
+  // ── edge-nub geometry helpers ───────────────────────────────────────
+  // Window rect in global coordinates (normalized across monitor-relative
+  // IPC builds, same as the corner button).
+  function geomOf(info, screen) {
+    if (!info || !info.at || !info.size || !screen) return null
+    var x = info.at[0] < screen.x ? info.at[0] + screen.x : info.at[0]
+    var y = info.at[1] < screen.y ? info.at[1] + screen.y : info.at[1]
+    return {
+      x: x,
+      y: y,
+      w: info.size[0],
+      h: info.size[1],
+      cx: x + info.size[0] / 2,
+      cy: y + info.size[1] / 2,
+      right: x + info.size[0],
+      bottom: y + info.size[1]
+    }
+  }
+
+  // Margins that center a hitSize-box on the middle of the given edge.
+  function edgeMarginLeft(edge, g, screen, boxW) {
+    return Math.round((edge === "left" ? g.x : g.cx) - screen.x - boxW / 2)
+  }
+  function edgeMarginRight(edge, g, screen, boxW) {
+    return Math.round(screen.x + screen.width - g.right - boxW / 2)
+  }
+  function edgeMarginTop(edge, g, screen, boxH) {
+    var mid = (edge === "left" || edge === "right") ? g.cy : g.y
+    return Math.round(mid - screen.y - boxH / 2)
+  }
+  function edgeMarginBottom(edge, g, screen, boxH) {
+    return Math.round(screen.y + screen.height - g.bottom - boxH / 2)
+  }
+
+  // Move a specific window one tiling step in a direction — the same
+  // behavior as SUPER+SHIFT+ARROW. hl.dsp.window.swap only operates on the
+  // focused window, so the target is focused first (without warping the
+  // cursor), then swapped, then the cursor warp setting is restored.
+  function swapWindow(addr, direction) {
+    var normalized = service.normalizedAddress(addr)
+    if (!normalized) return
+    var script = "addr=\"$1\"; dir=\"$2\"; "
+      + "orig=false; hyprctl -j getoption cursor:no_warps | grep -q '\"bool\": true' && orig=true; "
+      + "hyprctl eval 'hl.config({ cursor = { no_warps = true } })' >/dev/null; "
+      + "hyprctl dispatch \"hl.dsp.focus({ window = \\\"address:$addr\\\" })\"; "
+      + "hyprctl dispatch \"hl.dsp.window.swap({ direction = \\\"$dir\\\" })\"; "
+      + "hyprctl eval \"hl.config({ cursor = { no_warps = $orig } })\" >/dev/null"
+    Quickshell.execDetached(["bash", "-lc", script, "bash", normalized, direction])
   }
 
   // ── debug logging (tail journalctl or the per-run log.qslog) ───────
@@ -332,11 +471,11 @@ Item {
     }
   }
 
-  // ── per-window button (top-right) ───────────────────────────────────
-  Variants {
-    model: Hyprland.toplevels.values
+// ── per-window button (top-right) ───────────────────────────────────
+      Variants {
+        model: Hyprland.toplevels.values
 
-    PanelWindow {
+      PanelWindow {
       id: cornerWindow
       required property var modelData
 
@@ -348,8 +487,8 @@ Item {
         && info !== null && info.mapped !== false && info.hidden !== true
         && info.at && info.at.length === 2 && info.size && info.size.length === 2
         && targetScreen !== null
-      readonly property bool isActiveWindow: modelData !== null && Hyprland.activeToplevel !== null
-        && Hyprland.activeToplevel.address === modelData.address
+      readonly property bool isActiveWindow: modelData !== null && service.focusedAddress !== ""
+        && service.normalizedAddress(modelData.address) === service.focusedAddress
       property bool forceHidden: false
 
       // Hyprland reports window position in global coordinates, but some
@@ -426,7 +565,8 @@ Item {
           onHoveredChanged: {
             if (!hovered || !cornerWindow.modelData) return
             var addr = cornerWindow.modelData.address
-            if (Hyprland.activeToplevel && Hyprland.activeToplevel.address === addr) return
+            if (service.focusedAddress !== ""
+              && service.normalizedAddress(addr) === service.focusedAddress) return
             service.focusWindow(addr)
           }
         }
@@ -470,5 +610,186 @@ Item {
     }
 
     // Full-screen drag-mode overlay — see the service-level dragOverlay.
+  }
+
+  // ── per-window edge buttons (focused, tiled windows only) ─────────────
+  // A small square at the middle of each edge of the focused tiled window.
+  // It uses the same color as the main corner button (the float/tiling
+  // toggle), but is smaller. Left-click moves the tile one step in that
+  // direction, the same as SUPER+SHIFT+arrow.
+  Variants {
+    model: Hyprland.toplevels.values
+
+    delegate: Component {
+      Item {
+        required property var modelData
+
+        readonly property var info: modelData ? modelData.lastIpcObject : null
+        readonly property var edgeScreen: service.screenForMonitor(modelData ? modelData.monitor : null)
+        readonly property var g: service.geomOf(info, edgeScreen)
+        readonly property bool onActiveWorkspace: modelData !== null && modelData.workspace !== null
+          && (modelData.workspace.active === true || (info !== null && info.pinned === true))
+        readonly property bool isActiveWindow: modelData !== null && service.focusedAddress !== ""
+          && service.normalizedAddress(modelData.address) === service.focusedAddress
+        readonly property bool showable: onActiveWorkspace && isActiveWindow
+          && info !== null && info.mapped !== false && info.hidden !== true
+          && info.floating !== true && info.fullscreen !== true
+          && info.at && info.at.length === 2 && info.size && info.size.length === 2
+          && edgeScreen !== null && g !== null
+
+        readonly property bool nearLeft: service.cursorNearEdge(g, edgeScreen, "left", 0)
+        readonly property bool nearRight: service.cursorNearEdge(g, edgeScreen, "right", 0)
+        readonly property bool nearTop: service.cursorNearEdge(g, edgeScreen, "top", 0)
+        readonly property bool nearBottom: service.cursorNearEdge(g, edgeScreen, "bottom", 0)
+
+        // ── left edge ────────────────────────────────────────────────────
+        PanelWindow {
+          screen: edgeScreen
+          visible: showable && nearLeft
+          color: "transparent"
+          WlrLayershell.namespace: "omarchy-tinybuttons"
+          WlrLayershell.layer: WlrLayer.Overlay
+          WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+          exclusionMode: ExclusionMode.Ignore
+          implicitWidth: service.hitSize
+          implicitHeight: service.hitSize
+          anchors.left: true
+          anchors.top: true
+          margins.left: showable ? g.x - edgeScreen.x - service.hitSize / 2 : 0
+          margins.top: showable ? g.cy - edgeScreen.y - service.hitSize / 2 : 0
+
+          Rectangle {
+            width: service.edgeButtonSize
+            height: service.edgeButtonSize
+            anchors.centerIn: parent
+            color: hoverL.hovered
+              ? service.mixColor(service.mainButtonColor, Color.background, 0.35)
+              : service.mainButtonColor
+
+            HoverHandler {
+              id: hoverL
+              cursorShape: Qt.PointingHandCursor
+            }
+          }
+
+          TapHandler {
+            acceptedButtons: Qt.LeftButton
+            gesturePolicy: TapHandler.ReleaseWithinBounds
+            onTapped: service.swapWindow(modelData.address, "l")
+          }
+        }
+
+        // ── right edge ───────────────────────────────────────────────────
+        PanelWindow {
+          screen: edgeScreen
+          visible: showable && nearRight
+          color: "transparent"
+          WlrLayershell.namespace: "omarchy-tinybuttons"
+          WlrLayershell.layer: WlrLayer.Overlay
+          WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+          exclusionMode: ExclusionMode.Ignore
+          implicitWidth: service.hitSize
+          implicitHeight: service.hitSize
+          anchors.left: true
+          anchors.top: true
+          margins.left: showable ? g.right - edgeScreen.x - service.hitSize / 2 : 0
+          margins.top: showable ? g.cy - edgeScreen.y - service.hitSize / 2 : 0
+
+          Rectangle {
+            width: service.edgeButtonSize
+            height: service.edgeButtonSize
+            anchors.centerIn: parent
+            color: hoverR.hovered
+              ? service.mixColor(service.mainButtonColor, Color.background, 0.35)
+              : service.mainButtonColor
+
+            HoverHandler {
+              id: hoverR
+              cursorShape: Qt.PointingHandCursor
+            }
+          }
+
+          TapHandler {
+            acceptedButtons: Qt.LeftButton
+            gesturePolicy: TapHandler.ReleaseWithinBounds
+            onTapped: service.swapWindow(modelData.address, "r")
+          }
+        }
+
+        // ── top edge ─────────────────────────────────────────────────────
+        PanelWindow {
+          screen: edgeScreen
+          visible: showable && nearTop
+          color: "transparent"
+          WlrLayershell.namespace: "omarchy-tinybuttons"
+          WlrLayershell.layer: WlrLayer.Overlay
+          WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+          exclusionMode: ExclusionMode.Ignore
+          implicitWidth: service.hitSize
+          implicitHeight: service.hitSize
+          anchors.left: true
+          anchors.top: true
+          margins.left: showable ? g.cx - edgeScreen.x - service.hitSize / 2 : 0
+          margins.top: showable ? g.y - edgeScreen.y - service.hitSize / 2 : 0
+
+          Rectangle {
+            width: service.edgeButtonSize
+            height: service.edgeButtonSize
+            anchors.centerIn: parent
+            color: hoverT.hovered
+              ? service.mixColor(service.mainButtonColor, Color.background, 0.35)
+              : service.mainButtonColor
+
+            HoverHandler {
+              id: hoverT
+              cursorShape: Qt.PointingHandCursor
+            }
+          }
+
+          TapHandler {
+            acceptedButtons: Qt.LeftButton
+            gesturePolicy: TapHandler.ReleaseWithinBounds
+            onTapped: service.swapWindow(modelData.address, "u")
+          }
+        }
+
+        // ── bottom edge ──────────────────────────────────────────────────
+        PanelWindow {
+          screen: edgeScreen
+          visible: showable && nearBottom
+          color: "transparent"
+          WlrLayershell.namespace: "omarchy-tinybuttons"
+          WlrLayershell.layer: WlrLayer.Overlay
+          WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+          exclusionMode: ExclusionMode.Ignore
+          implicitWidth: service.hitSize
+          implicitHeight: service.hitSize
+          anchors.left: true
+          anchors.top: true
+          margins.left: showable ? g.cx - edgeScreen.x - service.hitSize / 2 : 0
+          margins.top: showable ? g.bottom - edgeScreen.y - service.hitSize / 2 : 0
+
+          Rectangle {
+            width: service.edgeButtonSize
+            height: service.edgeButtonSize
+            anchors.centerIn: parent
+            color: hoverB.hovered
+              ? service.mixColor(service.mainButtonColor, Color.background, 0.35)
+              : service.mainButtonColor
+
+            HoverHandler {
+              id: hoverB
+              cursorShape: Qt.PointingHandCursor
+            }
+          }
+
+          TapHandler {
+            acceptedButtons: Qt.LeftButton
+            gesturePolicy: TapHandler.ReleaseWithinBounds
+            onTapped: service.swapWindow(modelData.address, "d")
+          }
+        }
+      }
+    }
   }
 }
