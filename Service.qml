@@ -1,10 +1,14 @@
-// thetinybuttons — a single tiny corner button that does a lot.
+// thetinybuttons — edge arrows for tiled windows.
 //
-// One button on the top-right corner of every window:
-//   • Left-click  (primary) → toggle between tiling and float mode
-//   • Right-click (context) → close the window
-//   • 3-finger tap → enter drag mode: the window follows the cursor;
-//     tap anywhere on the monitor to drop it.
+// The focused tiled window gets a small arrow at the middle of each edge,
+// revealed only while the pointer is near that edge and only when the tile
+// can actually move in that direction (an edge already flush with the tiling
+// layout hides its arrow). Tapping an arrow swaps the tile one step.
+//
+// A legacy solid circle sat on the top-right corner of every window
+// (left=toggle float, right=close, 3-finger tap=drag). That function now
+// lives in the hyprbars titlebar buttons, so the corner button is compiled
+// off unless service.cornerButtonEnabled is set to true.
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -223,6 +227,11 @@ Item {
   // ── theme-aware colors ──────────────────────────────────────────────
   readonly property color circleColor: Color.flatColor(Color.pick("hyprland.active-border", Color.accent), Color.accent)
 
+  // The top-right corner button (float/tiling toggle) is disabled: that
+  // function now lives in the hyprbars titlebar buttons. The edge arrows stay
+  // enabled. Flip this to true to restore the corner button.
+  readonly property bool cornerButtonEnabled: false
+
   function mixColor(a, b, t) {
     return Qt.rgba(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, 1)
   }
@@ -298,6 +307,32 @@ Item {
       right: x + info.size[0],
       bottom: y + info.size[1]
     }
+  }
+
+  // Bounding box of all tiled (non-floating) windows on a workspace. The
+  // first/last tile is flush with this region's own edges, so a window whose
+  // edge touches the region has no swap partner in that direction — even
+  // when the region does not extend to a screen edge (gaps, reserved strips,
+  // asymmetric layouts). This is what "cannot move further" really means.
+  function tilingBounds(workspaceId) {
+    var ts = Hyprland.toplevels.values
+    var top = NaN, bottom = NaN, left = NaN, right = NaN
+    for (var i = 0; i < ts.length; i++) {
+      var t = ts[i]
+      if (!t || !t.workspace || t.workspace.id !== workspaceId) continue
+      var o = t.lastIpcObject
+      if (!o || o.mapped === false || o.hidden === true || o.floating !== false
+        || o.fullscreen === true || !o.at || !o.size
+        || o.at.length !== 2 || o.size.length !== 2) continue
+      var g = service.geomOf(o, service.screenForMonitor(t.monitor))
+      if (!g) continue
+      if (isNaN(top) || g.y < top) top = g.y
+      if (isNaN(left) || g.x < left) left = g.x
+      if (isNaN(bottom) || g.bottom > bottom) bottom = g.bottom
+      if (isNaN(right) || g.right > right) right = g.right
+    }
+    if (isNaN(top)) return null
+    return { left: left, top: top, right: right, bottom: bottom }
   }
 
   // Margins that center a hitSize-box on the middle of the given edge.
@@ -539,7 +574,9 @@ Item {
         : 0
 
       screen: targetScreen
-      visible: showable
+      // Corner button is disabled (see service.cornerButtonEnabled): the
+      // float/tiling toggle now lives in the hyprbars titlebar buttons.
+      visible: showable && service.cornerButtonEnabled
       color: "transparent"
 
       WlrLayershell.namespace: "omarchy-tinybuttons"
@@ -684,15 +721,23 @@ Item {
           }
           return n
         }
-        // A window flush against a screen edge cannot be swapped further in
-        // that direction, so its edge button is hidden — even while the
-        // cursor is near that edge.
-        readonly property bool canMoveLeft: g !== null && g.x - edgeScreen.x > service.edgeFlushTolerance
-        readonly property bool canMoveRight: g !== null
-          && (edgeScreen.x + edgeScreen.width) - g.right > service.edgeFlushTolerance
-        readonly property bool canMoveTop: g !== null && g.y - edgeScreen.y > service.edgeFlushTolerance
-        readonly property bool canMoveBottom: g !== null
-          && (edgeScreen.y + edgeScreen.height) - g.bottom > service.edgeFlushTolerance
+        // A window touching the tiling layout's own edge has no swap partner in
+        // that direction, so its edge button is hidden — even while the cursor
+        // is near that edge. The layout edge may sit away from the screen
+        // edge (gaps, reserved strips, asymmetric mosaics), so the two are
+        // compared, not the screen bounds.
+        readonly property var tiling: {
+          var _ = service.refreshTick
+          return modelData && modelData.workspace ? service.tilingBounds(modelData.workspace.id) : null
+        }
+        readonly property bool canMoveLeft: g !== null && tiling !== null
+          && g.x - tiling.left > service.edgeFlushTolerance
+        readonly property bool canMoveRight: g !== null && tiling !== null
+          && tiling.right - g.right > service.edgeFlushTolerance
+        readonly property bool canMoveTop: g !== null && tiling !== null
+          && g.y - tiling.top > service.edgeFlushTolerance
+        readonly property bool canMoveBottom: g !== null && tiling !== null
+          && tiling.bottom - g.bottom > service.edgeFlushTolerance
         readonly property bool showable: onActiveWorkspace && isActiveWindow
           && activeWorkspaceWindows > 1
           && info !== null && info.mapped !== false && info.hidden !== true
@@ -725,7 +770,8 @@ Item {
             width: service.edgeArrowSize
             height: service.edgeArrowSize
             anchors.horizontalCenter: parent.horizontalCenter
-            anchors.horizontalCenterOffset: -service.edgeArrowSize / 2
+            // Inside the window: the arrow tip touches the window's left edge.
+            anchors.horizontalCenterOffset: service.edgeArrowSize / 2
             anchors.verticalCenter: parent.verticalCenter
 
             Text {
@@ -772,7 +818,8 @@ Item {
             width: service.edgeArrowSize
             height: service.edgeArrowSize
             anchors.horizontalCenter: parent.horizontalCenter
-            anchors.horizontalCenterOffset: service.edgeArrowSize / 2
+            // Inside the window: the arrow tip touches the window's right edge.
+            anchors.horizontalCenterOffset: -service.edgeArrowSize / 2
             anchors.verticalCenter: parent.verticalCenter
 
             Text {
@@ -820,7 +867,8 @@ Item {
             height: service.edgeArrowSize
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.verticalCenter: parent.verticalCenter
-            anchors.verticalCenterOffset: -service.edgeArrowSize / 2
+            // Inside the window: the arrow tip touches the window's top edge.
+            anchors.verticalCenterOffset: service.edgeArrowSize / 2
 
             Text {
               anchors.centerIn: parent
@@ -867,7 +915,8 @@ Item {
             height: service.edgeArrowSize
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.verticalCenter: parent.verticalCenter
-            anchors.verticalCenterOffset: service.edgeArrowSize / 2
+            // Inside the window: the arrow tip touches the window's bottom edge.
+            anchors.verticalCenterOffset: -service.edgeArrowSize / 2
 
             Text {
               anchors.centerIn: parent
