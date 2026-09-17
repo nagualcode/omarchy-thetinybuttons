@@ -1,12 +1,24 @@
 # thetinybuttons
 
-Tiny direction arrows at the middle of each edge of the focused tiled window (moves the tile toward that edge) — and, when enabled, a legacy corner button.
+Tiny direction arrows at the middle of each edge of the focused tiled window (moves the tile toward that edge) — and a set of window-control buttons drawn over the titlebar, whose glyphs reflect the current window state (tiled vs. floating, maximized or not).
 
 An [Omarchy](https://omarchy.org) shell plugin.
 
 ## What it does
 
-The stars of the show are the **edge arrows** (see below). A legacy solid circle also used to sit on every window's top-right corner (float/close/drag); that function moved to the [hyprbars](https://github.com/hyprland-community/hyprbars) titlebar buttons, so the corner button is **disabled by default** — set `cornerButtonEnabled` to `true` in `Service.qml` to bring it back:
+### Titlebar window controls
+
+The [hyprbars](https://github.com/hyprland-community/hyprbars) plugin can only render static glyphs, so the titlebar controls are drawn here as an **overlay** over the bar, revealed while the pointer is on it. They are pure geometric shapes (no font/emoji) and swap by the window's live state:
+
+| Button | Glyph | Action |
+|--------|-------|--------|
+| Close | filled circle `●` | Close the window |
+| Float/tiling | `■` filled square while **floating**, hollow `□` square while **tiled** | Toggle tiling/float |
+| Maximize | `▲` triangle up while normal, inverted `▼` while maximized | Toggle maximize/restore |
+
+The buttons sit over the top-left of the titlebar (where the hyprbars buttons used to be) and are colored like the window border — accent when focused, muted border color when not. Titles bars are colored by the theme accent and reapplied from `hyprbars.lua`.
+
+A legacy solid circle also used to sit on every window's top-right corner (float/close/drag); that corner button is **disabled by default** — set `cornerButtonEnabled` to `true` in `Service.qml` to bring it back:
 
 | (legacy) corner button | Result |
 |------------------------|--------|
@@ -49,7 +61,8 @@ omarchy plugin remove nagualcode.thetinybuttons
 ## How it works
 
 - A small layer-shell panel per edge is created only for **tiled** windows and only while that window is **focused**; it draws a small arrow at the middle of the edge in the same color as the corner button, aligned just **inside** the window so its tip touches the edge. An edge's arrow is revealed only while the pointer is within a band around that edge (`hyprctl cursorpos` is polled every 150ms) **and** that edge can still move — it stays hidden when the edge is flush against the **tiling layout** (the bounding box of all tiled windows on the workspace, so top/bottom reserved strips, gaps and asymmetric mosaics are handled correctly), when fewer than two tiled windows share the workspace, or when the window floats or is fullscreen. `hl.dsp.window.swap` acts on the focused window only, so the target is focused first (no cursor warp) and swapped via the same dispatch as `SUPER+SHIFT+arrow`
-- The legacy top-right corner button and its drag mode are still compiled in but disabled via `cornerButtonEnabled` (default `false`): float/close now live in the hyprbars titlebar buttons
+- A one-layer-shell panel **per window** draws the three titlebar controls (circle / square / triangle) as an overlay over the hyprbars bar, at the window's top-left. The square and triangle glyphs are re-bound to the window's IPC state (`floating`, `fullscreen`), so they swap automatically; the panels are polled every 400ms so they stay glued and current. Clicks dispatch `hl.dsp.window.close`, `hl.dsp.window.float` and `hl.dsp.window.fullscreen` targeted by window address
+- The legacy top-right corner button and its drag mode are still compiled in but disabled via `cornerButtonEnabled` (default `false`): float/close now live in this plugin's titlebar controls (the native hyprbars buttons are removed)
 - In this Omarchy build `Hyprland.activeToplevel` is always null and the `activewindow` raw event carries no address, so the focused window is tracked by re-reading `hyprctl activewindow` whenever focus changes
 - When the legacy corner button is enabled: the button is a solid circle filled with the window border color (active or inactive), spans exactly one touch target so it works with both mouse and touchpad, and a 3-finger tap on it enters drag mode: a full-screen overlay polls `hyprctl cursorpos` to track the pointer, the window is floated (if it was not already) and moved via `hl.dsp.window.move` (relative), and the pointer is warped to the window's center so the drag is as precise as SUPER+drag; the next tap anywhere releases it. The window stays floating
 - Windows are polled every 400ms (80ms while dragging) so the buttons stay glued while windows move or resize

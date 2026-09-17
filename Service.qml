@@ -1,14 +1,15 @@
-// thetinybuttons — edge arrows for tiled windows.
+// thetinybuttons — edge arrows for tiled windows + titlebar window controls.
 //
 // The focused tiled window gets a small arrow at the middle of each edge,
 // revealed only while the pointer is near that edge and only when the tile
 // can actually move in that direction (an edge already flush with the tiling
 // layout hides its arrow). Tapping an arrow swaps the tile one step.
 //
-// A legacy solid circle sat on the top-right corner of every window
-// (left=toggle float, right=close, 3-finger tap=drag). That function now
-// lives in the hyprbars titlebar buttons, so the corner button is compiled
-// off unless service.cornerButtonEnabled is set to true.
+// The hyprbars titlebar buttons (● close / ■ float / ▲ maximize) only accept
+// static icon strings, so they can't reflect window state. They are redrawn
+// here as an overlay over the titlebar with geometric shapes whose glyphs
+// swap live: a filled square while floating, a hollow square while tiled,
+// and a triangle that flips when the window is maximized.
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -227,10 +228,28 @@ Item {
   // ── theme-aware colors ──────────────────────────────────────────────
   readonly property color circleColor: Color.flatColor(Color.pick("hyprland.active-border", Color.accent), Color.accent)
 
-  // The top-right corner button (float/tiling toggle) is disabled: that
-  // function now lives in the hyprbars titlebar buttons. The edge arrows stay
-  // enabled. Flip this to true to restore the corner button.
+  // The top-right corner button (float/tiling toggle) is disabled: the
+  // window controls now live in the titlebar overlay buttons (see
+  // titleButtonsEnabled below). The edge arrows stay enabled. Flip this to
+  // true to restore the corner button.
   readonly property bool cornerButtonEnabled: false
+
+  // ── titlebar buttons (replaces the native hyprbars glyphs) ───────────
+  // hyprbars renders static icons only, so the window-control buttons are
+  // drawn here, overlaying the titlebar, as geometric shapes whose state
+  // comes from the window: a hollow square while tiled, a filled square
+  // while floating, and a triangle that flips when the window is maxed.
+  readonly property bool titleButtonsEnabled: true
+  readonly property int titleBarHeight: 12
+  readonly property int titleBtnPadTop: 2
+  readonly property int titleBtnPadLeft: 10
+  readonly property int titleBtnCell: 18
+  readonly property int titleBtnGap: 8
+  readonly property int titleBtnGlyph: 9
+  readonly property int titleBtnTriW: 10
+  readonly property int titleBtnTriH: 10
+  readonly property int titleBtnRowWidth: service.titleBtnPadLeft
+    + (service.titleBtnCell * 3) + (service.titleBtnGap * 2)
 
   function mixColor(a, b, t) {
     return Qt.rgba(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, 1)
@@ -266,6 +285,13 @@ Item {
     var normalized = service.normalizedAddress(addr)
     if (!normalized) return
     Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.float({ action = \"toggle\", window = \"address:" + normalized + "\" })"])
+  }
+
+  // Toggle a window's maximized state — the hyprbars "▲"/"▼" action.
+  function toggleMaximize(addr) {
+    var normalized = service.normalizedAddress(addr)
+    if (!normalized) return
+    Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.window.fullscreen({ mode = \"maximized\", action = \"toggle\", window = \"address:" + normalized + "\" })"])
   }
 
   // Focus without warping the cursor — same trick as the original
@@ -683,7 +709,210 @@ Item {
       }
     }
 
+
     // Full-screen drag-mode overlay — see the service-level dragOverlay.
+  }
+
+  // ── titlebar window controls (top-left, over the hyprbars bar) ──────
+  // hyprbars can only render static glyphs, so the controls live here as
+  // an overlay drawn over the titlebar: a round close button, a square
+  // that's hollow while the window floats, and a triangle that flips when
+  // the window is maximized. Revealed while the pointer is over the bar.
+  Variants {
+    model: Hyprland.toplevels.values
+
+    delegate: Component {
+      Item {
+        required property var modelData
+
+        PanelWindow {
+          id: titleButtons
+
+          readonly property var info: modelData ? modelData.lastIpcObject : null
+          readonly property var targetScreen: service.screenForMonitor(modelData ? modelData.monitor : null)
+          readonly property bool onActiveWorkspace: modelData !== null && modelData.workspace !== null
+            && (modelData.workspace.active === true || (info !== null && info.pinned === true))
+          readonly property bool showable: onActiveWorkspace && service.titleButtonsEnabled
+            && info !== null && info.mapped !== false && info.hidden !== true
+            && info.at && info.at.length === 2 && info.size && info.size.length === 2
+            && targetScreen !== null
+          readonly property bool isActiveWindow: modelData !== null && service.focusedAddress !== ""
+            && service.normalizedAddress(modelData.address) === service.focusedAddress
+          // Glyph states come from the toplevel IPC object, refreshed by the
+          // glueTimer poll, so they track live float/fullscreen changes.
+          readonly property bool isFloating: info !== null && info.floating === true
+          // Empirically this build reports "maximized" as fullscreen === 1 and
+          // "fullscreen" as 2; either counts as an expanded state (▼ glyph).
+          readonly property bool isMaximized: info !== null && info.fullscreen !== 0
+          property bool forceHidden: false
+
+          readonly property real winLeft: info && info.at && targetScreen
+            ? (info.at[0] < targetScreen.x ? info.at[0] + targetScreen.x : info.at[0])
+            : 0
+          readonly property real winTop: info && info.at && targetScreen
+            ? (info.at[1] < targetScreen.y ? info.at[1] + targetScreen.y : info.at[1])
+            : 0
+
+          readonly property color glyphColor: titleButtons.isActiveWindow
+            ? service.circleColor : service.inactiveBorderColor
+
+          screen: targetScreen
+          visible: showable
+          color: "transparent"
+
+          WlrLayershell.namespace: "omarchy-titlebuttons"
+          WlrLayershell.layer: WlrLayer.Overlay
+          WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+          exclusionMode: ExclusionMode.Ignore
+
+          implicitWidth: service.titleBtnRowWidth
+          implicitHeight: service.titleBarHeight + service.titleBtnPadTop
+
+          anchors { left: true; top: true }
+          margins.left: showable ? Math.round(titleButtons.winLeft - targetScreen.x) : 0
+          margins.top: showable ? Math.round(titleButtons.winTop - targetScreen.y) : 0
+
+          function hideIfOutside(pos) {
+            if (pos.x < 0 || pos.y < 0 || pos.x > titleButtons.width || pos.y > titleButtons.height) {
+              titleButtons.forceHidden = true
+            }
+          }
+
+          HoverHandler {
+            id: titleHover
+            cursorShape: Qt.PointingHandCursor
+            onHoveredChanged: if (hovered) titleButtons.forceHidden = false
+          }
+
+          Item {
+            id: content
+            anchors.fill: parent
+            opacity: (titleHover.hovered && !titleButtons.forceHidden) ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: 120; easing.type: Easing.OutQuad } }
+
+            // ── close — filled circle ──────────────────────────────────
+            Item {
+              x: service.titleBtnPadLeft
+              y: service.titleBtnPadTop
+              width: service.titleBtnCell
+              height: service.titleBarHeight
+              property bool hovered: false
+              property bool pressed: false
+              readonly property color col: titleButtons.glyphColor
+
+              Rectangle {
+                width: service.titleBtnGlyph
+                height: service.titleBtnGlyph
+                radius: width / 2
+                anchors.centerIn: parent
+                color: parent.pressed
+                  ? service.mixColor(parent.col, Color.background, 0.5)
+                  : (parent.hovered ? service.mixColor(parent.col, Color.background, 0.35) : parent.col)
+              }
+
+              HoverHandler { onHoveredChanged: parent.hovered = hovered }
+              TapHandler {
+                id: closeTap
+                acceptedButtons: Qt.LeftButton
+                gesturePolicy: TapHandler.ReleaseWithinBounds
+                onPressedChanged: parent.pressed = pressed
+                onTapped: {
+                  service.closeWindow(modelData.address)
+                  titleButtons.hideIfOutside(closeTap.point.position)
+                }
+              }
+            }
+
+            // ── float/tiling — filled square when floating, hollow when tiled ─
+            Item {
+              x: service.titleBtnPadLeft + (service.titleBtnCell + service.titleBtnGap)
+              y: service.titleBtnPadTop
+              width: service.titleBtnCell
+              height: service.titleBarHeight
+              property bool hovered: false
+              property bool pressed: false
+              readonly property color col: titleButtons.glyphColor
+
+              Rectangle {
+                width: service.titleBtnGlyph
+                height: service.titleBtnGlyph
+                radius: 2
+                anchors.centerIn: parent
+                color: titleButtons.isFloating ? (parent.pressed
+                  ? service.mixColor(parent.col, Color.background, 0.5)
+                  : (parent.hovered ? service.mixColor(parent.col, Color.background, 0.35) : parent.col)) : "transparent"
+                border.color: parent.col
+                border.width: titleButtons.isFloating ? 0 : 1
+              }
+
+              HoverHandler { onHoveredChanged: parent.hovered = hovered }
+              TapHandler {
+                id: floatTap
+                acceptedButtons: Qt.LeftButton
+                gesturePolicy: TapHandler.ReleaseWithinBounds
+                onPressedChanged: parent.pressed = pressed
+                onTapped: {
+                  service.toggleWindow(modelData.address)
+                  titleButtons.hideIfOutside(floatTap.point.position)
+                }
+              }
+            }
+
+            // ── maximize — triangle up normally, inverted when maximized ────
+            Item {
+              x: service.titleBtnPadLeft + (service.titleBtnCell + service.titleBtnGap) * 2
+              y: service.titleBtnPadTop
+              width: service.titleBtnCell
+              height: service.titleBarHeight
+              property bool hovered: false
+              property bool pressed: false
+              readonly property color col: titleButtons.glyphColor
+
+              Canvas {
+                width: service.titleBtnTriW
+                height: service.titleBtnTriH
+                anchors.centerIn: parent
+                readonly property color col: parent.pressed
+                  ? service.mixColor(parent.col, Color.background, 0.5)
+                  : (parent.hovered ? service.mixColor(parent.col, Color.background, 0.35) : parent.col)
+                readonly property bool down: titleButtons.isMaximized
+                onPaint: {
+                  var ctx = getContext("2d")
+                  ctx.reset()
+                  ctx.fillStyle = col
+                  ctx.beginPath()
+                  if (down) {
+                    ctx.moveTo(width / 2, height)
+                    ctx.lineTo(width, 0)
+                    ctx.lineTo(0, 0)
+                  } else {
+                    ctx.moveTo(width / 2, 0)
+                    ctx.lineTo(width, height)
+                    ctx.lineTo(0, height)
+                  }
+                  ctx.closePath()
+                  ctx.fill()
+                }
+                onColChanged: requestPaint()
+                onDownChanged: requestPaint()
+              }
+
+              HoverHandler { onHoveredChanged: parent.hovered = hovered }
+              TapHandler {
+                id: maxTap
+                acceptedButtons: Qt.LeftButton
+                gesturePolicy: TapHandler.ReleaseWithinBounds
+                onPressedChanged: parent.pressed = pressed
+                onTapped: {
+                  service.toggleMaximize(modelData.address)
+                  titleButtons.hideIfOutside(maxTap.point.position)
+                }
+              }
+            }
+          }
+        }
+      }
+    }
   }
 
   // ── per-window edge buttons (focused, tiled windows only) ─────────────
