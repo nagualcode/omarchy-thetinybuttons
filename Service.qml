@@ -79,7 +79,10 @@ Item {
     command: ["hyprctl", "-j", "activewindow"]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: service.trackFocusFrom(text)
+      onStreamFinished: {
+        service.trackFocusFrom(text)
+        service.updateTitlebarReveal()
+      }
     }
   }
 
@@ -201,6 +204,87 @@ Item {
     return false
   }
 
+  // ── titlebar button reveal ───────────────────────────────────────────
+  // The titlebar controls may only appear once the pointer has crossed the
+  // window's hyprbars strip; the button row itself can only keep them on
+  // screen, never summon them. Crossings are inferred from the cursor +
+  // focused-window geometry polled below, so no extra input surface has to
+  // sit over the drag-grabbing titlebar.
+  property bool titleButtonsRevealed: false
+
+  // While the window is on the move (hyprbars bar drag, resize, animation)
+  // the polled geometry lags the real one, so the button panel visibly
+  // chases the window in steps. Motion sensing keeps the row hidden until
+  // a short run of stable samples — no chase, no strobing.
+  property bool titleButtonsMoving: false
+  property real titleButtonsLastX: -1
+  property real titleButtonsLastY: -1
+  property string titleButtonsFocusAddr: ""
+
+  function trackTitlebarMotion(x, y) {
+    if (service.titleButtonsFocusAddr !== service.focusedAddress) {
+      service.titleButtonsFocusAddr = service.focusedAddress
+      service.titleButtonsLastX = -1
+      service.titleButtonsLastY = -1
+    }
+    if (service.titleButtonsLastX >= 0) {
+      var dx = x - service.titleButtonsLastX
+      var dy = y - service.titleButtonsLastY
+      if (Math.abs(dx) + Math.abs(dy) >= 1.5) {
+        service.titleButtonsMoving = true
+        titleButtonsMotionTimer.restart()
+      }
+    }
+    service.titleButtonsLastX = x
+    service.titleButtonsLastY = y
+  }
+
+  function updateTitlebarReveal() {
+    if (!service.cursorKnown || service.focusedAddress === "") {
+      service.titleButtonsRevealed = false
+      return
+    }
+    var found = null
+    var ts = Hyprland.toplevels.values
+    for (var i = 0; i < ts.length; i++) {
+      var t = ts[i]
+      if (t && service.normalizedAddress(t.address) === service.focusedAddress) {
+        found = t
+        break
+      }
+    }
+    if (!found || !found.lastIpcObject) {
+      service.titleButtonsRevealed = false
+      return
+    }
+    var info = found.lastIpcObject
+    var screen = service.screenForMonitor(found.monitor)
+    if (!screen || !info.at || !info.size || info.at.length !== 2 || info.size.length !== 2
+      || info.mapped === false || info.hidden === true) {
+      service.titleButtonsRevealed = false
+      return
+    }
+    var x = info.at[0] < screen.x ? info.at[0] + screen.x : info.at[0]
+    var y = info.at[1] < screen.y ? info.at[1] + screen.y : info.at[1]
+    service.trackTitlebarMotion(x, y)
+    var barH = service.titleBarHeight + service.titleBtnPadTop
+    var btnW = Math.min(service.titleBtnRowWidth, info.size[0])
+    var cx = service.cursorX
+    var cy = service.cursorY
+    // The hyprbars bar (bar_part_of_window = false) floats ABOVE the window
+    // box, so the crossing region is the strip sitting on the window's top
+    // edge, from `y - barH` up to `y`. The button row lives just below it,
+    // at the window's top itself — it can hold the reveal, never summon it.
+    var barTop = y - barH
+    var overBar = cx >= x && cx <= x + info.size[0] && cy >= barTop && cy <= y
+    var overButtons = cx >= x && cx <= x + btnW && cy >= y && cy <= y + barH
+    var prev = service.titleButtonsRevealed
+    // Only *crossing the strip* turns them on. Sitting on the buttons alone
+    // just keeps whatever the strip already granted (their power is to keep,
+    // not to summon), and anything off both hides them at once.
+    service.titleButtonsRevealed = overBar && !overButtons ? true : (overButtons ? prev : false)
+  }
+
   Process {
     id: cursorPosProc
     command: ["hyprctl", "cursorpos"]
@@ -213,16 +297,23 @@ Item {
           service.cursorY = p[1]
           service.cursorKnown = true
         }
+        service.updateTitlebarReveal()
       }
     }
   }
 
   Timer {
     id: cursorEdgeTimer
-    interval: 150
+    interval: 80
     repeat: true
     running: true
     onTriggered: cursorPosProc.running = true
+  }
+
+  Timer {
+    id: titleButtonsMotionTimer
+    interval: 300
+    onTriggered: service.titleButtonsMoving = false
   }
 
   // ── theme-aware colors ──────────────────────────────────────────────
@@ -241,7 +332,7 @@ Item {
   // while floating, and a triangle that flips when the window is maxed.
   readonly property bool titleButtonsEnabled: true
   readonly property int titleBarHeight: 12
-  readonly property int titleBtnPadTop: 2
+  readonly property int titleBtnPadTop: 4
   readonly property int titleBtnPadLeft: 10
   readonly property int titleBtnCell: 18
   readonly property int titleBtnGap: 8
@@ -717,7 +808,10 @@ Item {
   // hyprbars can only render static glyphs, so the controls live here as
   // an overlay drawn over the titlebar: a round close button, a square
   // that's hollow while the window floats, and a triangle that flips when
-  // the window is maximized. Revealed while the pointer is over the bar.
+  // the window is maximized. They only ever belong to the focused window
+  // (see showable), appear when the pointer crosses the hyprbars strip
+  // (updateTitlebarReveal), and vanish the moment it leaves — the button
+  // row itself can keep them on screen, never summon them.
   Variants {
     model: Hyprland.toplevels.values
 
@@ -732,7 +826,11 @@ Item {
           readonly property var targetScreen: service.screenForMonitor(modelData ? modelData.monitor : null)
           readonly property bool onActiveWorkspace: modelData !== null && modelData.workspace !== null
             && (modelData.workspace.active === true || (info !== null && info.pinned === true))
+          // Only the focused window gets controls: any other toplevel on the
+          // workspace may be underneath a neighbour, and its buttons would
+          // render and act on a window you can't even see the front of.
           readonly property bool showable: onActiveWorkspace && service.titleButtonsEnabled
+            && isActiveWindow
             && info !== null && info.mapped !== false && info.hidden !== true
             && info.at && info.at.length === 2 && info.size && info.size.length === 2
             && targetScreen !== null
@@ -744,7 +842,6 @@ Item {
           // Empirically this build reports "maximized" as fullscreen === 1 and
           // "fullscreen" as 2; either counts as an expanded state (▼ glyph).
           readonly property bool isMaximized: info !== null && info.fullscreen !== 0
-          property bool forceHidden: false
 
           readonly property real winLeft: info && info.at && targetScreen
             ? (info.at[0] < targetScreen.x ? info.at[0] + targetScreen.x : info.at[0])
@@ -772,23 +869,22 @@ Item {
           margins.left: showable ? Math.round(titleButtons.winLeft - targetScreen.x) : 0
           margins.top: showable ? Math.round(titleButtons.winTop - targetScreen.y) : 0
 
-          function hideIfOutside(pos) {
-            if (pos.x < 0 || pos.y < 0 || pos.x > titleButtons.width || pos.y > titleButtons.height) {
-              titleButtons.forceHidden = true
-            }
-          }
-
+          // This handler only ever shapes the pointer; the reveal itself is
+          // cursor-polled in updateTitlebarReveal(). The button row has no
+          // summoning power — crossing the hyprbars strip does that.
           HoverHandler {
-            id: titleHover
             cursorShape: Qt.PointingHandCursor
-            onHoveredChanged: if (hovered) titleButtons.forceHidden = false
           }
 
           Item {
             id: content
             anchors.fill: parent
-            opacity: (titleHover.hovered && !titleButtons.forceHidden) ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: 120; easing.type: Easing.OutQuad } }
+            // Disabled until the strip has granted a reveal: an invisible row
+            // of buttons must not be clickable. Also kept out while the window
+            // is moving, so it never trails the drag.
+            enabled: service.titleButtonsRevealed && !service.titleButtonsMoving
+            opacity: (service.titleButtonsRevealed && !service.titleButtonsMoving) ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: 80; easing.type: Easing.OutQuad } }
 
             // ── close — filled circle ──────────────────────────────────
             Item {
@@ -818,7 +914,6 @@ Item {
                 onPressedChanged: parent.pressed = pressed
                 onTapped: {
                   service.closeWindow(modelData.address)
-                  titleButtons.hideIfOutside(closeTap.point.position)
                 }
               }
             }
@@ -853,7 +948,6 @@ Item {
                 onPressedChanged: parent.pressed = pressed
                 onTapped: {
                   service.toggleWindow(modelData.address)
-                  titleButtons.hideIfOutside(floatTap.point.position)
                 }
               }
             }
@@ -905,7 +999,6 @@ Item {
                 onPressedChanged: parent.pressed = pressed
                 onTapped: {
                   service.toggleMaximize(modelData.address)
-                  titleButtons.hideIfOutside(maxTap.point.position)
                 }
               }
             }
