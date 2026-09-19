@@ -273,10 +273,12 @@ Item {
     var cy = service.cursorY
     // The hyprbars bar (bar_part_of_window = false) floats ABOVE the window
     // box, so the crossing region is the strip sitting on the window's top
-    // edge, from `y - barH` up to `y`. The button row lives just below it,
-    // at the window's top itself — it can hold the reveal, never summon it.
+    // edge, from `y - barH` up to `y`. Only the portion of that strip above
+    // the button row (width `btnW`) can summon them — the rest of the bar is
+    // inert. The button row lives just below it, at the window's top itself;
+    // it can hold the reveal, never summon it.
     var barTop = y - barH
-    var overBar = cx >= x && cx <= x + info.size[0] && cy >= barTop && cy <= y
+    var overBar = cx >= x && cx <= x + btnW && cy >= barTop && cy <= y
     var overButtons = cx >= x && cx <= x + btnW && cy >= y && cy <= y + barH
     var prev = service.titleButtonsRevealed
     // Only *crossing the strip* turns them on. Sitting on the buttons alone
