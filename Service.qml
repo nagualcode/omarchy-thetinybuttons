@@ -240,6 +240,10 @@ Item {
   }
 
   function updateTitlebarReveal() {
+    if (!service.titleButtonsEnabled) {
+      service.titleButtonsRevealed = false
+      return
+    }
     if (!service.cursorKnown || service.focusedAddress === "") {
       service.titleButtonsRevealed = false
       return
@@ -332,7 +336,12 @@ Item {
   // drawn here, overlaying the titlebar, as geometric shapes whose state
   // comes from the window: a hollow square while tiled, a filled square
   // while floating, and a triangle that flips when the window is maxed.
-  readonly property bool titleButtonsEnabled: true
+  //
+  // Temporarily disabled: close/float/maximize are wanted out of the way for
+  // now, but the buttons are still compiled in. Flip this to `true` to bring
+  // them back — nothing else has to change. The edge arrows are independent of
+  // this flag and keep working either way.
+  readonly property bool titleButtonsEnabled: false
   readonly property int titleBarHeight: 12
   readonly property int titleBtnPadTop: 4
   readonly property int titleBtnPadLeft: 10

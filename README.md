@@ -8,6 +8,11 @@ An [Omarchy](https://omarchy.org) shell plugin.
 
 ### Titlebar window controls
 
+> **Currently disabled.** `titleButtonsEnabled` is `false` in `Service.qml`, so no
+> titlebar buttons are shown. Flip it to `true` to bring them back — the code is
+> all still compiled in and nothing else needs changing. The edge arrows below
+> are unaffected and keep working.
+
 The [hyprbars](https://github.com/hyprland-community/hyprbars) plugin can only render static glyphs, so the titlebar controls are drawn here as an **overlay** over the bar, revealed while the pointer is on it. They are pure geometric shapes (no font/emoji) and swap by the window's live state:
 
 | Button | Glyph | Action |
@@ -61,7 +66,7 @@ omarchy plugin remove nagualcode.thetinybuttons
 ## How it works
 
 - A small layer-shell panel per edge is created only for **tiled** windows and only while that window is **focused**; it draws a small arrow at the middle of the edge in the same color as the corner button, aligned just **inside** the window so its tip touches the edge. An edge's arrow is revealed only while the pointer is within a band around that edge (`hyprctl cursorpos` is polled every 150ms) **and** that edge can still move — it stays hidden when the edge is flush against the **tiling layout** (the bounding box of all tiled windows on the workspace, so top/bottom reserved strips, gaps and asymmetric mosaics are handled correctly), when fewer than two tiled windows share the workspace, or when the window floats or is fullscreen. `hl.dsp.window.swap` acts on the focused window only, so the target is focused first (no cursor warp) and swapped via the same dispatch as `SUPER+SHIFT+arrow`
-- A one-layer-shell panel **per window** draws the three titlebar controls (circle / square / triangle) as an overlay over the hyprbars bar, at the window's top-left. The square and triangle glyphs are re-bound to the window's IPC state (`floating`, `fullscreen`), so they swap automatically; the panels are polled every 400ms so they stay glued and current. Clicks dispatch `hl.dsp.window.close`, `hl.dsp.window.float` and `hl.dsp.window.fullscreen` targeted by window address
+- A one-layer-shell panel **per window** draws the three titlebar controls (circle / square / triangle) as an overlay over the hyprbars bar, at the window's top-left. The square and triangle glyphs are re-bound to the window's IPC state (`floating`, `fullscreen`), so they swap automatically; the panels are polled every 400ms so they stay glued and current. Clicks dispatch `hl.dsp.window.close`, `hl.dsp.window.float` and `hl.dsp.window.fullscreen` targeted by window address. Disabled by `titleButtonsEnabled` (default `false`), which gates both the panels and the reveal poller
 - The legacy top-right corner button and its drag mode are still compiled in but disabled via `cornerButtonEnabled` (default `false`): float/close now live in this plugin's titlebar controls (the native hyprbars buttons are removed)
 - In this Omarchy build `Hyprland.activeToplevel` is always null and the `activewindow` raw event carries no address, so the focused window is tracked by re-reading `hyprctl activewindow` whenever focus changes
 - When the legacy corner button is enabled: the button is a solid circle filled with the window border color (active or inactive), spans exactly one touch target so it works with both mouse and touchpad, and a 3-finger tap on it enters drag mode: a full-screen overlay polls `hyprctl cursorpos` to track the pointer, the window is floated (if it was not already) and moved via `hl.dsp.window.move` (relative), and the pointer is warped to the window's center so the drag is as precise as SUPER+drag; the next tap anywhere releases it. The window stays floating
